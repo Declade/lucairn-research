@@ -491,23 +491,28 @@ async function main(): Promise<void> {
 }
 
 /**
- * Promise-wrap a writeStream.write call so back-pressure is observed
- * deterministically and the row-to-row event-loop ordering doesn't
- * silently fall behind during high-throughput live runs.
+ * Promise-wrap a writeStream.write call so the M1 per-row fsync invariant
+ * actually holds. The previous implementation resolved on the synchronous
+ * `stream.write()` return-true, BEFORE the callback fired — fsync(fd) on
+ * that fd could then run before the chunk was committed to the kernel,
+ * defeating per-row durability (Codex r1 finding [2] at SHA 375f03a).
+ *
+ * The correct synchronization point is the write callback: it fires when
+ * the chunk has been handled by the underlying fs resource (data is in
+ * the kernel page cache; fsync at that point flushes it to physical
+ * storage). Back-pressure is naturally embedded — if the writable's
+ * internal buffer is full, the next chunk's callback is delayed until
+ * the buffer drains.
  */
 function writeLine(
   stream: ReturnType<typeof createWriteStream>,
   chunk: string,
 ): Promise<void> {
   return new Promise((res, rej) => {
-    const ok = stream.write(chunk, (err) => {
+    stream.write(chunk, (err) => {
       if (err) rej(err);
+      else res();
     });
-    if (ok) {
-      res();
-    } else {
-      stream.once('drain', () => res());
-    }
   });
 }
 
