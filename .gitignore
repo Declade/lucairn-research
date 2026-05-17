@@ -15,7 +15,10 @@ datasets/*/raw/
 datasets/*/with-injected-pii/
 
 # Per-paper raw run artifacts (cert chains, intermediate JSONL — only summaries are checked in)
-papers/*/raw-results/
+papers/*/raw-results/*
+# But keep the scaffold so the directory exists in a fresh clone.
+!papers/*/raw-results/.gitignore
+!papers/*/raw-results/.gitkeep
 
 # Internal PRD/planning anchors (kept locally for fresh-context resumes)
 specs/

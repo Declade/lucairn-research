@@ -41,14 +41,14 @@ Because MTSamples has no published ground-truth PHI annotations, a single measur
 
 This recipe documents the *full* methodology for Paper 1. The implementation lands incrementally:
 
-- **Slice 1 (current commit) — ships:**
+- **Slice 1 — shipped:**
   - Dataset acquisition script (`scripts/download-mtsamples.ts`)
   - Deterministic synthetic PII re-injection for Measurement B's 500-row subset (`scripts/inject-pii.ts`, `src/inject-pii-core.ts`)
   - Round-trip verification (`scripts/verify-injection.ts`)
-- **Slice 2 — pending:** harness to call the Lucairn gateway row-by-row, collect cert URLs, compute recall against Measurement B's known ground truth (`scripts/run-pipeline.ts`, `scripts/collect-certs.ts`, `scripts/compute-recall.ts`)
-- **Slice 3 — pending:** full Paper 1 run including **Measurement A's raw-corpus detection pass** (Lucairn over the full ~5k MTSamples corpus, reporting detection counts without ground truth) plus the Measurement B recall numbers + the `papers/paper-1-healthcare/CERTIFICATES.csv` cert-URL appendix
+- **Slice 2 (current commit) — shipped (mock-only):** harness to call the Lucairn gateway row-by-row via `POST /api/v1/proxy/messages` in `mode: "proving_ground"`, collect cert URLs, compute recall against Measurement B's known ground truth (`scripts/run-pipeline.ts`, `scripts/collect-certs.ts`, `scripts/compute-recall.ts`, `src/gateway-client.ts`, `src/redaction-extractor.ts`, `src/recall.ts`, `src/hipaa-category-mapping.ts`, `src/mocks/gateway-fixtures.ts`). The live gateway run is deferred to Slice 3.
+- **Slice 3 — pending:** full Paper 1 run including **Measurement A's raw-corpus detection pass** (Lucairn over the full ~5k MTSamples corpus, reporting detection counts without ground truth) plus the Measurement B recall numbers against the live gateway + the `papers/paper-1-healthcare/CERTIFICATES.csv` cert-URL appendix
 
-Until Slice 2 + Slice 3 land, the harness + Measurement A code does not exist in this repo. The methodology description below is the published target, not the current shipped state.
+Until Slice 3 lands, the live-gateway end-to-end run + Measurement A code does not exist in this repo. The methodology description below is the published target, not the current shipped state.
 
 ### Measurement A — raw-corpus detection (what does Lucairn flag in the wild?)
 
