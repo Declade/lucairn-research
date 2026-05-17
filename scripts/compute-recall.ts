@@ -167,12 +167,23 @@ async function loadEvaluationsFromNdjson(
     lineNo += 1;
     const trimmed = ln.trim();
     if (trimmed === '') continue;
+    // BLOCKER-2 (2026-05-17): tolerate partial-line tails left by a
+    // SIGKILL between `writeStream.write` and `fsyncSync` in
+    // scripts/run-pipeline.ts. Previous behaviour threw, which blocked the
+    // entire next pipeline step on a single trailing partial line —
+    // contradicting the run-pipeline doc-comment's "downstream consumers
+    // gracefully skip malformed lines" recovery contract. We skip-with-warn
+    // (NOT silent-skip) so operators retain visibility when a SIGKILL left
+    // partial output.
     let parsed: { row_index?: unknown; result?: unknown };
     try {
       parsed = JSON.parse(trimmed) as { row_index?: unknown; result?: unknown };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`${path}: line ${lineNo} not JSON: ${reason}`);
+      process.stderr.write(
+        `[compute-recall] skipping malformed line ${lineNo} in ${path}: ${reason}\n`,
+      );
+      continue;
     }
     if (typeof parsed.row_index !== 'number') continue;
     const result = parsed.result;
