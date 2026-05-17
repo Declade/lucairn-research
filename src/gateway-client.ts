@@ -25,9 +25,16 @@
  *       X-Upstream-Key header is absent).
  *
  * The retry policy is 2 retries with exponential backoff (base 500 ms, jitter
- * 0–200 ms) on 5xx and connection errors only. 4xx errors are surfaced
- * without retry. The per-request timeout defaults to 30 s and is configurable
- * via LUCAIRN_REQUEST_TIMEOUT_MS.
+ * 0–200 ms) on 5xx, HTTP 429 (Too Many Requests), and connection errors only.
+ * Other 4xx errors (400/401/403/404 etc.) are surfaced without retry. The
+ * per-request timeout defaults to 30 s and is configurable via
+ * LUCAIRN_REQUEST_TIMEOUT_MS.
+ *
+ * Optional client-side rate limiting via `rateLimitRpm` paces calls at no more
+ * than N requests per minute by gating every `runRow` dispatch on a
+ * `60_000 / rpm` minimum-interval since the previous dispatch. This is a
+ * coarse Anthropic-Tier-1-RPM-cap safety belt — Slice 2.5 M2; see
+ * `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5 section).
  *
  * No real secret material is referenced at import time — env reads happen at
  * call time inside makeGatewayClient(). Tests run with msw active and use
@@ -176,6 +183,20 @@ export interface GatewayClientOptions {
   readonly maxRetries?: number;
   readonly backoffBaseMs?: number;
   readonly backoffJitterMs?: number;
+  /**
+   * Optional client-side rate-limit budget in requests-per-minute. When set
+   * to a positive number, every `runRow` dispatch gates on a
+   * `60_000 / rateLimitRpm` minimum interval since the previous dispatch
+   * began. Values <= 0 (or undefined) disable rate-limiting. Slice 2.5 M2 —
+   * see `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
+   */
+  readonly rateLimitRpm?: number;
+  /**
+   * Injected clock for the rate-limiter (test only). Defaults to
+   * `Date.now`. Exposed so the rate-limit unit test can advance time
+   * deterministically without sleeping.
+   */
+  readonly nowFn?: () => number;
   readonly fetchFn?: typeof fetch;
   readonly sleepFn?: (ms: number) => Promise<void>;
   readonly randomFn?: () => number;
@@ -296,6 +317,7 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
   const fetchFn = options.fetchFn ?? fetch;
   const sleepFn = options.sleepFn ?? defaultSleep;
   const randomFn = options.randomFn ?? Math.random;
+  const nowFn = options.nowFn ?? Date.now;
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const backoffBase = options.backoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS;
@@ -312,7 +334,31 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
       : null;
   const endpoint = `${options.gatewayUrl.replace(/\/+$/u, '')}/api/v1/proxy/messages`;
 
+  // Rate-limit gate state. `rateLimitRpm <= 0` (or undefined) disables the
+  // gate entirely; otherwise the minimum spacing between two consecutive
+  // dispatches is `60_000 / rpm` ms. `lastDispatchAt` is null until the
+  // first row dispatches, so the first call is never delayed.
+  const rateLimitRpm =
+    typeof options.rateLimitRpm === 'number' && options.rateLimitRpm > 0
+      ? options.rateLimitRpm
+      : null;
+  const minIntervalMs = rateLimitRpm === null ? 0 : 60_000 / rateLimitRpm;
+  let lastDispatchAt: number | null = null;
+
   async function runRow(row: GatewayRowInput): Promise<GatewayRowResult> {
+    // Rate-limit gate. Single-flight per client instance (Slice 2.5 M2 only
+    // gates per-row sequential dispatches — the harness loop is sequential,
+    // see `scripts/run-pipeline.ts` row-by-row for-loop). Concurrency
+    // control across multiple in-flight clients is out of scope here.
+    if (minIntervalMs > 0 && lastDispatchAt !== null) {
+      const elapsed = nowFn() - lastDispatchAt;
+      const wait = minIntervalMs - elapsed;
+      if (wait > 0) {
+        await sleepFn(wait);
+      }
+    }
+    lastDispatchAt = nowFn();
+
     const body: GatewayRequestBody = {
       prompt_template:
         'Echo the transcription back verbatim. Make no inferences. Transcription: {transcription}',
@@ -351,12 +397,18 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
         });
         clearTimeout(timeoutHandle);
         timeoutHandle = null;
-        if (response.status >= 500) {
+        // HTTP 429 (Too Many Requests) is retry-eligible alongside 5xx —
+        // Slice 2.5 M2; Anthropic Tier-1 RPM caps surface as 429 from the
+        // upstream and propagate through the gateway. Other 4xx
+        // (400/401/403/404/etc.) remain terminal — those are client-side
+        // errors that won't fix themselves on retry.
+        if (response.status === 429 || response.status >= 500) {
           // Retry-eligible.
           const text = await safeReadText(response);
           if (attempt > maxRetries) {
+            const klass = response.status === 429 ? '429' : '5xx';
             throw new GatewayClientError(
-              `gateway 5xx after ${attempt - 1} retries (status ${response.status})`,
+              `gateway ${klass} after ${attempt - 1} retries (status ${response.status})`,
               response.status,
               text,
             );
@@ -365,7 +417,7 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
           continue;
         }
         if (response.status >= 400) {
-          // 4xx is terminal — surface immediately, no retry.
+          // 4xx-non-429 is terminal — surface immediately, no retry.
           const text = await safeReadText(response);
           throw new GatewayClientError(
             `gateway 4xx (status ${response.status})`,

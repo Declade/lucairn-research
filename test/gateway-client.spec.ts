@@ -1,3 +1,8 @@
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
@@ -321,4 +326,216 @@ describe('makeGatewayClient', () => {
     expect(firstArg as string).toMatch(/dropped 2 ground-truth annotation\(s\)/u);
     warnSpy.mockRestore();
   });
+
+  // Slice 2.5 M2 — rate-limit (requests-per-minute). The client gates every
+  // dispatch after the first on `60_000 / rateLimitRpm` ms minimum interval
+  // since the previous dispatch began. We inject `nowFn` for a deterministic
+  // virtual clock and capture `sleepFn(ms)` arguments to assert the spacing.
+  // Also locks the disable contract: rateLimitRpm omitted OR <= 0 must NOT
+  // call sleepFn. See `prd-2026-05-17-paper-1-autonomous-finish.md`
+  // (Slice 2.5 section) and `src/gateway-client.ts::GatewayClientOptions.rateLimitRpm`.
+  it('rate-limit gates dispatches to N rpm via sleepFn(60_000/N); disabled when omitted or <=0', async () => {
+    server.use(
+      http.post(ENDPOINT, () => HttpResponse.json(successResponse())),
+    );
+
+    // Sub-case A: rpm=60 → expect 1000 ms sleep on each call after the first.
+    // Virtual clock — `nowFn()` is frozen so every dispatch after the first
+    // measures elapsed=0 against the `60_000/rpm = 1000` ms budget and asks
+    // sleepFn for the full 1000 ms.
+    const sleepsEnabled: number[] = [];
+    const virtualNow = 1_000_000;
+    const clientEnabled = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      rateLimitRpm: 60,
+      nowFn: () => virtualNow,
+      sleepFn: async (ms) => {
+        sleepsEnabled.push(ms);
+      },
+    });
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await clientEnabled.runRow({ row_index: i, transcription: 'x', entities: [] });
+    }
+    // First call never sleeps (lastDispatchAt=null). Calls 2-5 each sleep
+    // for the full minIntervalMs because the virtual clock is frozen.
+    expect(sleepsEnabled).toEqual([1000, 1000, 1000, 1000]);
+
+    // Sub-case B: rpm omitted → no sleeps fire at all.
+    const sleepsUnset: number[] = [];
+    const clientUnset = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      sleepFn: async (ms) => {
+        sleepsUnset.push(ms);
+      },
+    });
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await clientUnset.runRow({ row_index: i, transcription: 'x', entities: [] });
+    }
+    expect(sleepsUnset).toEqual([]);
+
+    // Sub-case C: rpm=0 → also no sleeps (non-positive disables).
+    const sleepsZero: number[] = [];
+    const clientZero = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      rateLimitRpm: 0,
+      sleepFn: async (ms) => {
+        sleepsZero.push(ms);
+      },
+    });
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await clientZero.runRow({ row_index: i, transcription: 'x', entities: [] });
+    }
+    expect(sleepsZero).toEqual([]);
+  });
+
+  // Slice 2.5 M2 — HTTP 429 (Too Many Requests) is retry-eligible alongside
+  // 5xx and connection errors. Other 4xx (400/401/403/404 etc.) remain
+  // terminal. Anthropic Tier-1 RPM caps surface as 429 from the upstream
+  // and propagate through the gateway. See
+  // `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
+  it('retries on HTTP 429 and recovers; 4xx-non-429 does not retry', async () => {
+    // First sub-case: 429 then 200 → exactly one retry, success.
+    let calls = 0;
+    server.use(
+      http.post(ENDPOINT, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.json({ error: 'rate_limited' }, { status: 429 });
+        }
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const sleeps429: number[] = [];
+    const client429 = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 2,
+      backoffBaseMs: 10,
+      backoffJitterMs: 5,
+      sleepFn: async (ms) => {
+        sleeps429.push(ms);
+      },
+      randomFn: () => 0.5,
+    });
+    const result = await client429.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    expect(calls).toBe(2);
+    expect(sleeps429.length).toBe(1);
+    // First retry backoff = base*2^0 + 0.5*jitter = 10 + 2.5 → floor 12.
+    expect(sleeps429[0]).toBe(12);
+    expect(result.request_id).toBe('req_test_0001');
+
+    // Second sub-case: persistent 429 → throws after retry budget with status 429.
+    server.use(
+      http.post(ENDPOINT, () => HttpResponse.json({ error: 'rate_limited' }, { status: 429 })),
+    );
+    const clientPersist = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 1,
+      backoffBaseMs: 1,
+      backoffJitterMs: 1,
+      sleepFn: async () => undefined,
+      randomFn: () => 0,
+    });
+    let thrown: GatewayClientError | null = null;
+    try {
+      await clientPersist.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    } catch (err) {
+      if (err instanceof GatewayClientError) thrown = err;
+    }
+    expect(thrown).not.toBeNull();
+    expect(thrown?.status).toBe(429);
+    expect(thrown?.message).toMatch(/gateway 429 after 1 retries/u);
+
+    // Third sub-case: 401 (4xx-non-429) → terminal, exactly one call, no retry.
+    let calls401 = 0;
+    server.use(
+      http.post(ENDPOINT, () => {
+        calls401 += 1;
+        return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
+      }),
+    );
+    const client401 = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 5,
+      sleepFn: async () => undefined,
+      randomFn: () => 0,
+    });
+    let thrown401: GatewayClientError | null = null;
+    try {
+      await client401.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    } catch (err) {
+      if (err instanceof GatewayClientError) thrown401 = err;
+    }
+    expect(thrown401).not.toBeNull();
+    expect(thrown401?.status).toBe(401);
+    expect(calls401).toBe(1);
+  });
+});
+
+// Slice 2.5 M1 — streaming NDJSON writer in `scripts/run-pipeline.ts` must
+// preserve rows 1..N-1 in the output file when the harness is killed
+// mid-run. This is the load-bearing acceptance test: the previous
+// buffered-in-memory pattern (atomic-write at EOF) lost ALL rows on any
+// process-death event. The replacement is per-row `createWriteStream`
+// append + fsync. See `prd-2026-05-17-paper-1-autonomous-finish.md`
+// (Slice 2.5) and `scripts/run-pipeline.ts` `writeStream` block.
+describe('run-pipeline streaming NDJSON writer (M1)', () => {
+  it('preserves rows 1..N-1 on SIGTERM mid-run', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'slice25-sigterm-'));
+    const outputPath = join(tmpDir, 'run.ndjson');
+    try {
+      const proc = spawn(
+        'node',
+        [
+          '--import',
+          'tsx',
+          'scripts/run-pipeline.ts',
+          '--rows=20',
+          '--mock',
+          // 30 rpm = 2000 ms spacing → predictable timing for the
+          // mid-run kill at ~2.5 s elapsed. With 30 rpm spacing, rows
+          // 1+2 dispatch at t=0 + t=2s, then SIGTERM at t=2.5s drops
+          // the harness before row 3 lands.
+          '--rate-limit-rpm=30',
+          `--output=${outputPath}`,
+        ],
+        { cwd: process.cwd(), stdio: 'ignore' },
+      );
+      // Give the harness time to dispatch at least 1 row (rate-limit
+      // 30 rpm = 2000 ms per row gap), then SIGTERM.
+      await new Promise<void>((res) => setTimeout(res, 2500));
+      proc.kill('SIGTERM');
+      await new Promise<void>((res) => {
+        proc.once('exit', () => res());
+      });
+      expect(existsSync(outputPath)).toBe(true);
+      const fileText = readFileSync(outputPath, 'utf8');
+      const lines = fileText.split('\n').filter((l) => l.trim().length > 0);
+      // Must have at least 1 valid NDJSON record; must have STRICTLY
+      // FEWER than 20 (proves the harness was actually killed mid-run,
+      // not allowed to complete all 20 rows).
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      expect(lines.length).toBeLessThan(20);
+      // Every surviving line MUST parse as JSON (no half-written
+      // record at the tail). The fsync after each write guarantees
+      // the partial line we'd see in a pure-buffered-stream scenario
+      // is not visible here.
+      for (const ln of lines) {
+        expect(() => JSON.parse(ln)).not.toThrow();
+        const obj = JSON.parse(ln) as Record<string, unknown>;
+        expect(typeof obj['row_index']).toBe('number');
+        expect(obj['mode']).toBe('mock');
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
