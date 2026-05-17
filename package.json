@@ -1,0 +1,36 @@
+{
+  "name": "@lucairn/research",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Empirical methodology code for the Lucairn Research Program — per-industry vendor-published methodology papers measuring AI Act Cat-1 evidence completeness end-to-end.",
+  "license": "MIT",
+  "author": "Marc Schülke <marc@lucairn.eu> (https://lucairn.eu)",
+  "homepage": "https://lucairn.eu/research",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Declade/lucairn-research.git"
+  },
+  "type": "module",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "pnpm run clean && tsc",
+    "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dataset:download": "node --import tsx scripts/download-mtsamples.ts",
+    "dataset:inject-pii": "node --import tsx scripts/inject-pii.ts",
+    "dataset:verify-injection": "node --import tsx scripts/verify-injection.ts"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^9.0.0",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.22.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

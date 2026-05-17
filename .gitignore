@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+.vitest-cache/
+.tsbuildinfo
+.DS_Store
+.env
+.env.local
+*.log
+
+# Raw downloaded datasets (large; reproducible via dataset:download script)
+datasets/*/raw/
+
+# Generated PII-injected corpora (large; reproducible via dataset:inject-pii)
+datasets/*/with-injected-pii/
+
+# Per-paper raw run artifacts (cert chains, intermediate JSONL — only summaries are checked in)
+papers/*/raw-results/
+
+# Internal PRD/planning anchors (kept locally for fresh-context resumes)
+specs/
