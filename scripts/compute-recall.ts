@@ -342,8 +342,10 @@ async function main(): Promise<void> {
   const summary = aggregateExtracted(extracted, [
     `Source: ${cli.redactionsSource}; rows processed: ${targetRows.length}.`,
   ]);
-  await writeFile(cli.output, JSON.stringify(summary, null, 2) + '\n', 'utf8');
+  // Validate BEFORE writing. If validation throws, a bogus SUMMARY.json
+  // never lands on disk for downstream consumers to consume.
   await validateAgainstSchema(summary, defaultSchemaPath());
+  await writeFile(cli.output, JSON.stringify(summary, null, 2) + '\n', 'utf8');
 
   process.stdout.write(
     `wrote SUMMARY.json (${targetRows.length} rows, ` +

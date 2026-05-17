@@ -12,7 +12,7 @@ Empirical methodology code for the Lucairn Research Program — a per-industry s
 ## What this repo is NOT
 
 - Not a Lucairn product. The Lucairn platform itself lives elsewhere (gateway, sanitizer, witness, certificate verifier).
-- Not a customer-deployment artifact. These are vendor-published methodology papers; the publisher and the methodology are named in full. No customer attribution. No persona-driven narrative.
+- Not a customer-deployment artifact. These are vendor-published methodology papers; the publisher and the methodology are named in full. No customer attribution. No persona-driven narrative. No attributed endorsement quotes.
 - Not a CLI or a publishable npm package. It is a methodology codebase, run from a clone.
 - Not a customer-implementation report. The artifact frame is a vendor benchmark / methodology paper; persona-driven or implementation-report framing does not appear in any paper title, route slug, social card, or meta description.
 - Not legal advice. Regulatory references are factual citations to primary sources (EUR-Lex Regulation 2024/1689; HHS HIPAA Safe Harbor enumeration; published clinical-NLP de-identification literature); they are not interpretations.

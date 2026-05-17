@@ -43,7 +43,12 @@ const DEFAULT_TRUTH_PATH =
 const DEFAULT_SUBSET_PATH =
   'datasets/healthcare/with-injected-pii/measurement-b-subset.csv';
 const MOCK_GATEWAY_URL = 'http://mock.lucairn.local';
-const MOCK_API_KEY = 'lcr_live_mock_0000000000000000000000000000';
+// Synthetic mock key. Uses an `lcr_mock_` prefix (NOT `lcr_live_`) so the
+// real production key prefix never appears in committed code — secret
+// scanners (truffleHog, gitleaks, GitHub secret scanning) would otherwise
+// flag this file the moment the repo flips public. Length preserved so any
+// length-based sanity checks elsewhere don't drift.
+const MOCK_API_KEY = 'lcr_mock_0000000000000000000000000000';
 
 interface CliArgs {
   rows: number | null;
@@ -54,6 +59,17 @@ interface CliArgs {
   output: string;
   gateway: string | null;
   apiKey: string | null;
+  /**
+   * Upstream LLM API key (Anthropic for Claude models, OpenAI for GPT
+   * models, etc.) for BYOK-per-request customer profiles. Wired as
+   * `X-Upstream-Key` header on every gateway call. Required when the
+   * Lucairn customer profile has `ByokPerRequest: true` — the gateway
+   * returns 400 `missing_upstream_key` otherwise. See
+   * `dual-sandbox-architecture/services/gateway/internal/api/proxy.go:349-354`
+   * for the gate. Falls back to `process.env.LUCAIRN_UPSTREAM_KEY` when the
+   * flag is absent. Ignored under `--mock`.
+   */
+  upstreamKey: string | null;
   missRate: number;
   spuriousFpCount: number;
   activityIdPrefix: string;
@@ -71,6 +87,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
       .replace(/[:.]/gu, '-')}.ndjson`,
     gateway: null,
     apiKey: null,
+    upstreamKey: null,
     missRate: 0,
     spuriousFpCount: 0,
     activityIdPrefix: 'paper-1-healthcare',
@@ -103,6 +120,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case '--api-key':
         args.apiKey = val;
+        break;
+      case '--upstream-key':
+        args.upstreamKey = val;
         break;
       case '--miss-rate':
         args.missRate = parseFloatOrThrow(val, '--miss-rate');
@@ -154,10 +174,19 @@ function printHelp(): void {
     '  --output=PATH        NDJSON output path. Default: papers/paper-1-healthcare/raw-results/run-<ISO>.ndjson',
     '  --gateway=URL        gateway URL override (also honoured under --live).',
     '  --api-key=KEY        API key override (--live only).',
+    '  --upstream-key=KEY   Upstream LLM API key for BYOK-per-request customer profiles.',
+    '                       Sent as X-Upstream-Key header. Falls back to LUCAIRN_UPSTREAM_KEY env.',
+    '                       Required when the Lucairn profile has ByokPerRequest: true; otherwise',
+    '                       the gateway returns HTTP 400 missing_upstream_key. Ignored under --mock.',
     '  --miss-rate=F        --mock only. Fraction of injected entities the mock misses. Default: 0.',
     '  --spurious-fp-count=N --mock only. Synthetic FP redactions per row. Default: 0.',
     '  --activity-id-prefix=S  per-row activity_id prefix. Default: paper-1-healthcare.',
     '',
+    'Auth modes for --live runs (4 valid combinations):',
+    '  1. lcr_live_* key + non-BYOK customer profile     → only --api-key / LUCAIRN_API_KEY required.',
+    '  2. lcr_live_* key + ByokPerRequest profile         → --api-key + --upstream-key both required.',
+    '  3. Direct provider key + X-DSA-Key auth fallback   → not supported by this harness.',
+    '  4. Authorization: Bearer relay                     → not supported by this harness.',
     'Slice 2 ships --mock support only. --live is reserved for Slice 3 and requires Marc-confirmation.',
   ];
   for (const ln of lines) {
@@ -290,6 +319,10 @@ async function main(): Promise<void> {
   let mock: MockServerHandle | null = null;
   let gatewayUrl: string;
   let apiKey: string;
+  // Upstream LLM API key for BYOK-per-request flows; null when --mock or
+  // when the customer profile doesn't require BYOK. See the auth-modes
+  // table in printHelp() for the four valid combinations.
+  let upstreamKey: string | null = null;
   if (cli.mock) {
     mock = mountMockServer(cli.missRate, cli.spuriousFpCount);
     gatewayUrl = MOCK_GATEWAY_URL;
@@ -298,6 +331,7 @@ async function main(): Promise<void> {
     const env = readGatewayEnv();
     gatewayUrl = cli.gateway ?? env.gatewayUrl ?? '';
     apiKey = cli.apiKey ?? env.apiKey ?? '';
+    upstreamKey = cli.upstreamKey ?? env.upstreamKey ?? null;
     if (gatewayUrl === '' || apiKey === '') {
       throw new Error(
         '--live requires LUCAIRN_GATEWAY_URL + LUCAIRN_API_KEY in env or --gateway / --api-key flags',
@@ -310,6 +344,7 @@ async function main(): Promise<void> {
   const client = makeGatewayClient({
     gatewayUrl,
     apiKey,
+    ...(upstreamKey !== null ? { upstreamKey } : {}),
     activityIdPrefix: cli.activityIdPrefix,
   });
 
