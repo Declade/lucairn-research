@@ -118,6 +118,17 @@ async function main(): Promise<void> {
     }
   }
 
+  // CERTIFICATES.csv schema. Slice 2 dispatch brief specified a 7-column
+  // minimum (row_index, cert_url, cert_id, overall_verdict, redaction_count,
+  // latency_ms, timestamp_utc). We ship a superset of 9 columns; the two
+  // extensions over the brief minimum are:
+  //   - summary_url:  the /summary HTML-view sibling of cert_url. Included
+  //                   so readers / auditors can paste directly into a
+  //                   browser without reconstructing the URL.
+  //   - error_code:   per-row failure code (empty string when row succeeded).
+  //                   Included so the paper appendix honestly records which
+  //                   rows failed instead of silently dropping them.
+  // The 7 brief-required columns are all present in their requested order.
   const headers = [
     'row_index',
     'cert_url',

@@ -182,11 +182,11 @@ function printHelp(): void {
     '  --spurious-fp-count=N --mock only. Synthetic FP redactions per row. Default: 0.',
     '  --activity-id-prefix=S  per-row activity_id prefix. Default: paper-1-healthcare.',
     '',
-    'Auth modes for --live runs (4 valid combinations):',
-    '  1. lcr_live_* key + non-BYOK customer profile     → only --api-key / LUCAIRN_API_KEY required.',
-    '  2. lcr_live_* key + ByokPerRequest profile         → --api-key + --upstream-key both required.',
-    '  3. Direct provider key + X-DSA-Key auth fallback   → not supported by this harness.',
-    '  4. Authorization: Bearer relay                     → not supported by this harness.',
+    'Auth modes (3 supported by this harness; covers Slice 2 mock + Slice 3 live):',
+    '  1. --mock                                          → no auth required; in-process msw mock; tests + dev.',
+    '  2. --live + --api-key                              → non-BYOK customer profile (Lucairn-managed AI).',
+    '  3. --live + --api-key + --upstream-key             → BYOK-per-request profile; gateway gate at',
+    '                                                       dual-sandbox-architecture/services/gateway/internal/api/proxy.go:349-354.',
     'Slice 2 ships --mock support only. --live is reserved for Slice 3 and requires Marc-confirmation.',
   ];
   for (const ln of lines) {
