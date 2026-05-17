@@ -25,6 +25,7 @@
   "devDependencies": {
     "@faker-js/faker": "^9.0.0",
     "@types/node": "^20.11.0",
+    "msw": "^2.14.6",
     "tsx": "^4.22.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
