@@ -1,0 +1,374 @@
+/**
+ * run-pipeline.ts
+ *
+ * Slice 2 harness — call the Lucairn gateway row-by-row over the
+ * Measurement-B 500-row subset (or a smaller --rows slice), recording each
+ * gateway response to an NDJSON file under `papers/paper-1-healthcare/raw-
+ * results/`. Designed to run in two modes:
+ *
+ *   - LIVE (default): hits a real gateway at LUCAIRN_GATEWAY_URL with an
+ *     LUCAIRN_API_KEY. Live runs are deferred to Slice 3 per the locked
+ *     halt gate. Do not run live by accident — the script refuses to start
+ *     without an explicit --live flag.
+ *   - MOCK (--mock): mounts a deterministic msw fixture server in-process.
+ *     The harness fetches the loopback `mock://` URL the msw handler
+ *     intercepts. No network egress. The mock honours `--miss-rate` and
+ *     `--spurious-fp-count` so smoke tests can drive recall paths against
+ *     a known oracle.
+ *
+ * Usage:
+ *   pnpm run pipeline -- --rows=5 --mock --output=/tmp/slice2-smoke.ndjson
+ *   pnpm run pipeline -- --rows=500 --mock --output=papers/paper-1-healthcare/raw-results/mock-500.ndjson
+ *   pnpm run pipeline -- --live --rows=20    # Slice 3 only
+ */
+
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { setupServer } from 'msw/node';
+import { http, HttpResponse } from 'msw';
+
+import {
+  GatewayClientError,
+  type GatewayRowResult,
+  makeGatewayClient,
+  readGatewayEnv,
+} from '../src/gateway-client.js';
+import type { InjectedEntity } from '../src/inject-pii-core.js';
+import { parseCsv } from '../src/csv.js';
+import { buildMockResponse, entitiesFromRequestBody } from '../src/mocks/gateway-fixtures.js';
+
+const DEFAULT_TRUTH_PATH =
+  'datasets/healthcare/with-injected-pii/ground-truth.jsonl';
+const DEFAULT_SUBSET_PATH =
+  'datasets/healthcare/with-injected-pii/measurement-b-subset.csv';
+const MOCK_GATEWAY_URL = 'http://mock.lucairn.local';
+const MOCK_API_KEY = 'lcr_live_mock_0000000000000000000000000000';
+
+interface CliArgs {
+  rows: number | null;
+  mock: boolean;
+  live: boolean;
+  truth: string;
+  subset: string;
+  output: string;
+  gateway: string | null;
+  apiKey: string | null;
+  missRate: number;
+  spuriousFpCount: number;
+  activityIdPrefix: string;
+}
+
+function parseArgs(argv: readonly string[]): CliArgs {
+  const args: CliArgs = {
+    rows: null,
+    mock: false,
+    live: false,
+    truth: DEFAULT_TRUTH_PATH,
+    subset: DEFAULT_SUBSET_PATH,
+    output: `papers/paper-1-healthcare/raw-results/run-${new Date()
+      .toISOString()
+      .replace(/[:.]/gu, '-')}.ndjson`,
+    gateway: null,
+    apiKey: null,
+    missRate: 0,
+    spuriousFpCount: 0,
+    activityIdPrefix: 'paper-1-healthcare',
+  };
+  for (const raw of argv) {
+    const eq = raw.indexOf('=');
+    const key = eq === -1 ? raw : raw.slice(0, eq);
+    const val = eq === -1 ? '' : raw.slice(eq + 1);
+    switch (key) {
+      case '--rows':
+        args.rows = parseIntOrThrow(val, '--rows');
+        break;
+      case '--mock':
+        args.mock = true;
+        break;
+      case '--live':
+        args.live = true;
+        break;
+      case '--truth':
+        args.truth = val;
+        break;
+      case '--subset':
+        args.subset = val;
+        break;
+      case '--output':
+        args.output = val;
+        break;
+      case '--gateway':
+        args.gateway = val;
+        break;
+      case '--api-key':
+        args.apiKey = val;
+        break;
+      case '--miss-rate':
+        args.missRate = parseFloatOrThrow(val, '--miss-rate');
+        break;
+      case '--spurious-fp-count':
+        args.spuriousFpCount = parseIntOrThrow(val, '--spurious-fp-count');
+        break;
+      case '--activity-id-prefix':
+        args.activityIdPrefix = val;
+        break;
+      case '--help':
+      case '-h':
+        printHelp();
+        process.exit(0);
+        break;
+      default:
+        if (raw.length > 0 && raw !== '--') {
+          throw new Error(`unknown argument: ${raw}`);
+        }
+    }
+  }
+  return args;
+}
+
+function parseIntOrThrow(s: string, flag: string): number {
+  const n = Number.parseInt(s, 10);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${flag} requires a non-negative integer`);
+  return n;
+}
+
+function parseFloatOrThrow(s: string, flag: string): number {
+  const n = Number.parseFloat(s);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`${flag} requires a number in [0, 1]`);
+  }
+  return n;
+}
+
+function printHelp(): void {
+  const lines = [
+    'Usage: pnpm run pipeline -- [options]',
+    '',
+    'Options:',
+    '  --rows=N             limit run to first N rows (sorted by row_index). Default: all rows in ground truth.',
+    '  --mock               mount msw mock; no network egress. Mutually exclusive with --live.',
+    '  --live               require LUCAIRN_GATEWAY_URL + LUCAIRN_API_KEY in env (Slice 3 use).',
+    '  --truth=PATH         ground-truth JSONL path. Default: datasets/healthcare/with-injected-pii/ground-truth.jsonl',
+    '  --subset=PATH        Measurement-B subset CSV path. Default: datasets/healthcare/with-injected-pii/measurement-b-subset.csv',
+    '  --output=PATH        NDJSON output path. Default: papers/paper-1-healthcare/raw-results/run-<ISO>.ndjson',
+    '  --gateway=URL        gateway URL override (also honoured under --live).',
+    '  --api-key=KEY        API key override (--live only).',
+    '  --miss-rate=F        --mock only. Fraction of injected entities the mock misses. Default: 0.',
+    '  --spurious-fp-count=N --mock only. Synthetic FP redactions per row. Default: 0.',
+    '  --activity-id-prefix=S  per-row activity_id prefix. Default: paper-1-healthcare.',
+    '',
+    'Slice 2 ships --mock support only. --live is reserved for Slice 3 and requires Marc-confirmation.',
+  ];
+  for (const ln of lines) {
+    process.stdout.write(`${ln}\n`);
+  }
+}
+
+async function loadGroundTruth(path: string): Promise<Map<number, readonly InjectedEntity[]>> {
+  const text = await readFile(path, 'utf8');
+  const out = new Map<number, InjectedEntity[]>();
+  let lineNo = 0;
+  for (const ln of text.split('\n')) {
+    lineNo += 1;
+    const trimmed = ln.trim();
+    if (trimmed === '') continue;
+    let parsed: { row_index: unknown; entities: unknown };
+    try {
+      parsed = JSON.parse(trimmed) as { row_index: unknown; entities: unknown };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`ground truth line ${lineNo} is not valid JSON: ${reason}`);
+    }
+    if (typeof parsed.row_index !== 'number' || !Array.isArray(parsed.entities)) {
+      throw new Error(`ground truth line ${lineNo} missing row_index or entities`);
+    }
+    const entities: InjectedEntity[] = [];
+    for (const item of parsed.entities as unknown[]) {
+      if (typeof item !== 'object' || item === null) continue;
+      const e = item as {
+        category?: unknown;
+        value?: unknown;
+        start_char?: unknown;
+        end_char?: unknown;
+      };
+      if (
+        typeof e.category === 'string' &&
+        typeof e.value === 'string' &&
+        typeof e.start_char === 'number' &&
+        typeof e.end_char === 'number'
+      ) {
+        entities.push({
+          // The injected categories are HipaaCategory by construction; we
+          // intentionally avoid a runtime narrowing assertion so a malformed
+          // ground-truth line surfaces in the recall computation rather than
+          // at parse time.
+          category: e.category as InjectedEntity['category'],
+          value: e.value,
+          start_char: e.start_char,
+          end_char: e.end_char,
+        });
+      }
+    }
+    out.set(parsed.row_index, entities);
+  }
+  return out;
+}
+
+async function loadTranscriptions(path: string): Promise<Map<number, string>> {
+  const text = await readFile(path, 'utf8');
+  const { rows } = parseCsv(text);
+  const out = new Map<number, string>();
+  for (const row of rows) {
+    const idxStr = row['original_row_index'] ?? '';
+    const idx = Number.parseInt(idxStr, 10);
+    if (!Number.isFinite(idx)) continue;
+    const tr = row['transcription'] ?? '';
+    out.set(idx, tr);
+  }
+  return out;
+}
+
+interface MockServerHandle {
+  close(): void;
+}
+
+function mountMockServer(missRate: number, spuriousFpCount: number): MockServerHandle {
+  const handlers = [
+    http.post(
+      `${MOCK_GATEWAY_URL}/api/v1/proxy/messages`,
+      async ({ request }) => {
+        const body = (await request.json()) as unknown;
+        const { rowIndex, entities } = entitiesFromRequestBody(body);
+        if (rowIndex === null) {
+          return HttpResponse.json(
+            { error: { code: 'invalid_body', message: 'mock could not parse activity_id row-N suffix' } },
+            { status: 400 },
+          );
+        }
+        const response = buildMockResponse({
+          rowIndex,
+          entities,
+          missRate,
+          spuriousFpCount,
+        });
+        return HttpResponse.json(response);
+      },
+    ),
+  ];
+  const server = setupServer(...handlers);
+  server.listen({ onUnhandledRequest: 'error' });
+  return { close: () => server.close() };
+}
+
+async function ensureOutputDir(outputPath: string): Promise<void> {
+  const dir = dirname(resolve(outputPath));
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+}
+
+async function main(): Promise<void> {
+  const cli = parseArgs(process.argv.slice(2));
+  if (cli.mock && cli.live) {
+    throw new Error('--mock and --live are mutually exclusive');
+  }
+  if (!cli.mock && !cli.live) {
+    process.stderr.write(
+      'run-pipeline: neither --mock nor --live specified. Slice 2 supports --mock only.\n' +
+        'Add --mock for the in-process smoke flow, or --live (Slice 3 + Marc-confirmation).\n',
+    );
+    process.exit(2);
+  }
+
+  const truthByRow = await loadGroundTruth(cli.truth);
+  const transcriptByRow = await loadTranscriptions(cli.subset);
+  const indices = Array.from(truthByRow.keys()).sort((a, b) => a - b);
+  const limit = cli.rows ?? indices.length;
+  const target = indices.slice(0, limit);
+
+  let mock: MockServerHandle | null = null;
+  let gatewayUrl: string;
+  let apiKey: string;
+  if (cli.mock) {
+    mock = mountMockServer(cli.missRate, cli.spuriousFpCount);
+    gatewayUrl = MOCK_GATEWAY_URL;
+    apiKey = MOCK_API_KEY;
+  } else {
+    const env = readGatewayEnv();
+    gatewayUrl = cli.gateway ?? env.gatewayUrl ?? '';
+    apiKey = cli.apiKey ?? env.apiKey ?? '';
+    if (gatewayUrl === '' || apiKey === '') {
+      throw new Error(
+        '--live requires LUCAIRN_GATEWAY_URL + LUCAIRN_API_KEY in env or --gateway / --api-key flags',
+      );
+    }
+  }
+
+  await ensureOutputDir(cli.output);
+
+  const client = makeGatewayClient({
+    gatewayUrl,
+    apiKey,
+    activityIdPrefix: cli.activityIdPrefix,
+  });
+
+  const writer = await import('node:fs/promises');
+  let written = 0;
+  const startedAt = Date.now();
+  const records: string[] = [];
+  for (const rowIndex of target) {
+    const entities = truthByRow.get(rowIndex) ?? [];
+    const transcription = transcriptByRow.get(rowIndex) ?? '';
+    let result: GatewayRowResult | null = null;
+    let error: { code: string; message: string } | null = null;
+    try {
+      result = await client.runRow({
+        row_index: rowIndex,
+        transcription,
+        entities,
+      });
+    } catch (err) {
+      if (err instanceof GatewayClientError) {
+        error = {
+          code: 'gateway_error',
+          message: `${err.message} (status=${err.status ?? 'null'})`,
+        };
+      } else if (err instanceof Error) {
+        error = { code: 'unknown_error', message: err.message };
+      } else {
+        error = { code: 'unknown_error', message: String(err) };
+      }
+    }
+    const ndjsonLine = JSON.stringify({
+      row_index: rowIndex,
+      timestamp_utc: new Date().toISOString(),
+      entities_submitted: entities.length,
+      transcription_length: transcription.length,
+      gateway: gatewayUrl,
+      mode: cli.mock ? 'mock' : 'live',
+      mock_miss_rate: cli.mock ? cli.missRate : null,
+      mock_spurious_fp_count: cli.mock ? cli.spuriousFpCount : null,
+      result,
+      error,
+    });
+    records.push(ndjsonLine);
+    written += 1;
+  }
+  await writer.writeFile(cli.output, records.join('\n') + '\n', 'utf8');
+
+  const elapsedMs = Date.now() - startedAt;
+  process.stdout.write(
+    `wrote ${written} record(s) to ${cli.output} in ${elapsedMs} ms (mode=${
+      cli.mock ? 'mock' : 'live'
+    })\n`,
+  );
+
+  mock?.close();
+}
+
+main().catch((err: unknown) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`run-pipeline: ${msg}\n`);
+  process.exit(1);
+});
