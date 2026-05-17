@@ -8,6 +8,13 @@
 export type CsvRow = Record<string, string>;
 
 export function parseCsv(text: string): { headers: string[]; rows: CsvRow[] } {
+  // Strip a leading UTF-8 byte-order mark if present. Kaggle / Excel exports
+  // sometimes ship a BOM at the head of the file; without this strip, the
+  // first header name silently carries the U+FEFF byte and downstream column
+  // lookups by name fail.
+  if (text.charCodeAt(0) === 0xfeff) {
+    text = text.slice(1);
+  }
   const records = parseCsvRecords(text);
   if (records.length === 0) return { headers: [], rows: [] };
   const headers = records[0] ?? [];

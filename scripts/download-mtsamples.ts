@@ -109,12 +109,34 @@ function main(): void {
     process.stdout.write(`[download] CSV already present at ${CSV_PATH}; skipping download.\n`);
   }
 
+  // ORDER MATTERS: hash first, then row-count.
+  // Rationale: if EXPECTED-HASH.txt is present and the new download mismatches,
+  // we must fail IMMEDIATELY — before any row processing — so the operator
+  // sees the integrity violation rather than a derivative symptom.
   const csvHash = sha256(CSV_PATH);
   const csvBytes = statSync(CSV_PATH).size;
-  const rowCount = countCsvRows(CSV_PATH);
 
   process.stdout.write(`[verify] sha256:       ${csvHash}\n`);
   process.stdout.write(`[verify] size bytes:   ${csvBytes}\n`);
+
+  // Step 1: hash check (immediate fail-closed on mismatch).
+  const hashFileExists = existsSync(EXPECTED_HASH_PATH);
+  if (hashFileExists) {
+    const expected = readFileSync(EXPECTED_HASH_PATH, 'utf8').trim();
+    if (expected !== csvHash) {
+      throw new Error(
+        `SHA-256 mismatch — refusing to process this CSV:\n` +
+          `  expected ${expected}\n` +
+          `  actual   ${csvHash}\n` +
+          `If you have intentionally re-acquired the dataset, delete ${EXPECTED_HASH_PATH} and re-run.`,
+      );
+    }
+    process.stdout.write(`[verify] sha256 matches EXPECTED-HASH.txt\n`);
+  }
+
+  // Step 2: row count check (only reached if hash check passed, or if this is
+  // the first acquisition and EXPECTED-HASH.txt does not yet exist).
+  const rowCount = countCsvRows(CSV_PATH);
   process.stdout.write(`[verify] row count:    ${rowCount}\n`);
 
   if (rowCount < MIN_ROW_COUNT || rowCount > MAX_ROW_COUNT) {
@@ -124,16 +146,10 @@ function main(): void {
     );
   }
 
-  if (existsSync(EXPECTED_HASH_PATH)) {
-    const expected = readFileSync(EXPECTED_HASH_PATH, 'utf8').trim();
-    if (expected !== csvHash) {
-      throw new Error(
-        `SHA-256 mismatch:\n  expected ${expected}\n  actual   ${csvHash}\n` +
-          `If you have intentionally re-acquired the dataset, delete ${EXPECTED_HASH_PATH} and re-run.`,
-      );
-    }
-    process.stdout.write(`[verify] sha256 matches EXPECTED-HASH.txt\n`);
-  } else {
+  // Step 3: only NOW — after both hash AND row-count checks pass — record the
+  // hash on first acquisition. This avoids writing EXPECTED-HASH.txt for a
+  // download whose row count is out-of-band.
+  if (!hashFileExists) {
     writeFileSync(EXPECTED_HASH_PATH, `${csvHash}\n`, 'utf8');
     process.stdout.write(`[verify] recorded sha256 to EXPECTED-HASH.txt (first acquisition)\n`);
   }

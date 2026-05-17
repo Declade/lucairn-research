@@ -55,7 +55,7 @@ Because MTSamples has no published ground-truth PHI annotations, a single measur
 
 The injection density used in Measurement B is calibrated to the i2b2 2014 corpus baseline.
 
-- **i2b2 baseline (Stubbs & Uzuner, 2015):** 28,872 PHI entities annotated across 1,304 longitudinal medical-record notes = **~22 PHI entities per note**, distributed across the i2b2 HIPAA+ extended category set.
+- **i2b2 baseline (Stubbs & Uzuner, 2015):** the i2b2 2014/UTHealth de-identification corpus comprises **1,304 longitudinal medical-record notes describing 296 diabetic patients**, with **~22 PHI entities per note on average** distributed across the i2b2 HIPAA+ extended category set. The precise total annotation count is documented in the paper full-text; we cite the per-note baseline only because that is the value our re-injection density references.
   - Reference: Stubbs A., Uzuner Ö. "Annotating longitudinal clinical narratives for de-identification: The 2014 i2b2/UTHealth corpus." *Journal of Biomedical Informatics*, vol. 58, supplement, pp. S20–S29, 2015. PMID: 26319540. DOI: <https://doi.org/10.1016/j.jbi.2015.07.020>.
 - **Target injection density for Measurement B:** **20–25 PHI entities per note**, sampled uniformly within that range per row.
 - **Per-category distribution:** roughly approximates the i2b2 empirical proportions — DATE is the most frequent category (~35%), followed by NAME (~20%), LOCATION (~15%), ID-shaped categories (~10% combined), with the remaining 11 Safe Harbor categories splitting the residual ~20% uniformly. Exact per-row counts are determined by the deterministic Faker seed and recorded in the per-row ground-truth JSONL.
@@ -79,9 +79,13 @@ The 18 categories of identifiers that, per HHS 45 CFR § 164.514(b)(2)(i), must 
 13. **Device identifiers** and serial numbers.
 14. **Web Universal Resource Locators (URLs).**
 15. **Internet Protocol (IP) address numbers.**
-16. **Biometric identifiers**, including finger and voice prints. *(Injected as a labelled placeholder string; biometric encoding is out of scope for this recipe.)*
-17. **Full face photographic images and any comparable images.** *(Injected as a labelled placeholder string referencing an image filename; binary image content is out of scope for this recipe.)*
-18. **Any other unique identifying number, characteristic, or code** — injected as a small variety of synthetic ID-shaped strings (e.g. study-arm identifier, encounter token).
+16. **Biometric identifiers**, including finger and voice prints. *(Injected as a single labelled placeholder shape per row — `BIO-FINGERPRINT-<16 uppercase alphanumeric>` (e.g. `BIO-FINGERPRINT-A4F2K9LM3PQR7XYZ`); biometric encoding is out of scope for this recipe.)*
+17. **Full face photographic images and any comparable images.** *(Injected as a single labelled placeholder shape per row — `face-photo://<12 alphanumeric>.jpg` (e.g. `face-photo://aB3kL9mN2pQr.jpg`); binary image content is out of scope for this recipe.)*
+18. **Any other unique identifying number, characteristic, or code** — injected as a single labelled placeholder shape per row — `STUDY-<8 uppercase alphanumeric>` (e.g. `STUDY-K7M2X9PQ`).
+
+Per-category placeholder shapes 1–15 are emitted by Faker primitives (see `src/inject-pii-core.ts` `synthesizeValue`) and therefore exhibit Faker's natural shape variation; categories 16/17/18 use a single deterministic shape each, as the underlying real-world identifiers (raw biometric encodings, binary image bytes, opaque study tokens) have no canonical synthetic shape.
+
+For all 18 categories, the **per-row count** of injected PHI entities is sampled uniformly within the `[MIN_PHI_PER_ROW, MAX_PHI_PER_ROW] = [20, 25]` range per row (see `src/inject-pii-core.ts:185` — `pickInt(rowRng, MIN_PHI_PER_ROW, MAX_PHI_PER_ROW)`), with the exact count for each row determined by the deterministic row-RNG seed.
 
 Source: HHS Office for Civil Rights — *Guidance Regarding Methods for De-identification of Protected Health Information in Accordance with the Health Insurance Portability and Accountability Act (HIPAA) Privacy Rule* — <https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html>.
 

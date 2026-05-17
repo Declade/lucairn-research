@@ -23,10 +23,12 @@ EU AI Act enforcement is rolling. The relevant calendar for Paper 1:
 
 - **2 February 2025** — Article 5 prohibitions in force.
 - **2 August 2025** — General-Purpose AI Model (GPAI) obligations in force.
-- **2 August 2026** — Annex III high-risk obligations in force (including the Article 10 + 12 + 14 + 15 evidence obligations that drive this paper series).
-- **2 August 2027** — legacy-system obligations in force.
+- **2 August 2026** — Chapter III high-risk-system obligations (Articles 8–15) apply for AI systems newly placed on the market in the Annex III high-risk areas (Article 6(2)). This is the trigger date Paper 1's measurements are scoped to.
+- **2 August 2027** — Article 6(1) classification (high-risk AI as safety components of products covered by Annex I Union harmonisation legislation) applies. Pre-existing high-risk systems and GPAI models follow the separate timeline in Article 111.
 
-Each paper anchors its measurements to the Annex III obligations relevant to that industry's high-risk use case.
+Sources: Regulation (EU) 2024/1689 Articles 6, 111, 113; AI Office Service Desk; artificialintelligenceact.eu.
+
+Paper 1's headline measurement is **Cat-1 evidence completeness** (AI Act Articles 10 and 15 — data governance and accuracy/robustness) for an Annex III high-risk healthcare use case. The methodology — every row produces a signed cert with full lineage — incidentally produces evidence relevant to Cat-2 (Article 12 record-keeping) and Cat-3 (the inventory bundle of Articles 10 + 12 + 14 + 15), but those are not the headline claim of this paper. Subsequent industry papers in the series may shift the headline.
 
 ## Currently included
 
