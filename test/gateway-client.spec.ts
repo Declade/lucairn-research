@@ -396,7 +396,7 @@ describe('makeGatewayClient', () => {
 
   // Slice 2.5 M2 — HTTP 429 (Too Many Requests) is retry-eligible alongside
   // 5xx and connection errors. Other 4xx (400/401/403/404 etc.) remain
-  // terminal. Anthropic Tier-1 RPM caps surface as 429 from the upstream
+  // terminal. Anthropic API rate-limit tier RPM caps surface as 429 from the upstream
   // and propagate through the gateway. See
   // `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
   it('retries on HTTP 429 and recovers; 4xx-non-429 does not retry', async () => {
@@ -478,6 +478,122 @@ describe('makeGatewayClient', () => {
     expect(thrown401?.status).toBe(401);
     expect(calls401).toBe(1);
   });
+
+  // HIGH-1 (2026-05-17) — Retry-After header on 429 responses must override
+  // the fixed exponential-backoff floor when the server's hint is larger.
+  // Anthropic returns `Retry-After: <seconds>` or `Retry-After: <HTTP-date>`
+  // (RFC 6585 / RFC 7231 §7.1.3); ignoring it means our 2-retry budget can
+  // hit a second 429 mid-budget and waste rows. The retry classifier honors
+  // `Math.max(retryAfterMs, computedBackoffMs)` so we never sleep LESS than
+  // our own backoff.
+  it('honors Retry-After (numeric seconds) on 429 — sleeps >= 5000 ms', async () => {
+    let calls = 0;
+    server.use(
+      http.post(ENDPOINT, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.json(
+            { error: 'rate_limited' },
+            { status: 429, headers: { 'Retry-After': '5' } },
+          );
+        }
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const sleeps: number[] = [];
+    const client = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 2,
+      // Small base so we can see the Retry-After dominating max().
+      backoffBaseMs: 10,
+      backoffJitterMs: 5,
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+      randomFn: () => 0,
+    });
+    const result = await client.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    expect(calls).toBe(2);
+    expect(sleeps.length).toBe(1);
+    // Retry-After: 5 → 5000 ms. computedBackoff would be 10 + 0 = 10 ms.
+    // max(5000, 10) = 5000.
+    expect(sleeps[0]).toBe(5000);
+    expect(result.request_id).toBe('req_test_0001');
+  });
+
+  it('honors Retry-After (HTTP-date ~30s in future) on 429 — sleeps ~30000 ms', async () => {
+    let calls = 0;
+    // Pin a wall-clock target ~30s ahead. We compute it as a real Date so
+    // the parseRetryAfterMs path uses Date.parse + (target - Date.now()).
+    const targetDate = new Date(Date.now() + 30_000).toUTCString();
+    server.use(
+      http.post(ENDPOINT, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.json(
+            { error: 'rate_limited' },
+            { status: 429, headers: { 'Retry-After': targetDate } },
+          );
+        }
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const sleeps: number[] = [];
+    const client = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 2,
+      backoffBaseMs: 10,
+      backoffJitterMs: 5,
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+      randomFn: () => 0,
+    });
+    await client.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    expect(calls).toBe(2);
+    expect(sleeps.length).toBe(1);
+    // Allow generous slack — Date.parse → integer-second IMF-fixdate
+    // truncation + scheduler jitter between mock setup and the retry
+    // classifier reading the header. Expect approximately 30_000 ms,
+    // accept 28_000 .. 31_000.
+    const slept = sleeps[0]!;
+    expect(slept).toBeGreaterThanOrEqual(28_000);
+    expect(slept).toBeLessThanOrEqual(31_000);
+  });
+
+  it('falls back to computed backoff when no Retry-After header is present', async () => {
+    let calls = 0;
+    server.use(
+      http.post(ENDPOINT, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.json({ error: 'rate_limited' }, { status: 429 });
+        }
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const sleeps: number[] = [];
+    const client = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      maxRetries: 2,
+      backoffBaseMs: 10,
+      backoffJitterMs: 5,
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+      randomFn: () => 0.5,
+    });
+    await client.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    expect(calls).toBe(2);
+    expect(sleeps.length).toBe(1);
+    // No Retry-After → exactly the computed backoff (base*2^0 + 0.5*jitter
+    // = 10 + 2.5 → floor 12 ms). Locks that absent-header path doesn't
+    // accidentally over-sleep.
+    expect(sleeps[0]).toBe(12);
+  });
 });
 
 // Slice 2.5 M1 — streaming NDJSON writer in `scripts/run-pipeline.ts` must
@@ -487,8 +603,23 @@ describe('makeGatewayClient', () => {
 // process-death event. The replacement is per-row `createWriteStream`
 // append + fsync. See `prd-2026-05-17-paper-1-autonomous-finish.md`
 // (Slice 2.5) and `scripts/run-pipeline.ts` `writeStream` block.
+//
+// HIGH-2 strengthening (2026-05-17): the test now asserts THREE invariants
+// beyond "at least 1 line, all parse as JSON":
+//   (a) lines.map(l => row_index) === target.slice(0, lines.length) — i.e.
+//       surviving rows are the first N of the target slice in dispatch
+//       order, no holes, no out-of-order.
+//   (b) fileText.endsWith('\n') — last write completed fully before
+//       SIGTERM; there is no partial-line tail. Combined with (a) this
+//       confirms the fsync after each write actually fired and the partial
+//       line we'd see on a pure-buffered-stream is NOT visible.
+//   (c) every surviving line carries `mode: "mock"` (sanity that we're
+//       reading the right file).
+// Without (a) + (b) the test passes by luck even if the implementation
+// regresses to skipping fsync (BLOCKER-1 was passing by OS-buffering luck
+// before this fix-up landed).
 describe('run-pipeline streaming NDJSON writer (M1)', () => {
-  it('preserves rows 1..N-1 on SIGTERM mid-run', async () => {
+  it('preserves rows 1..N-1 on SIGTERM mid-run with no partial-line tail', async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'slice25-sigterm-'));
     const outputPath = join(tmpDir, 'run.ndjson');
     try {
@@ -518,6 +649,13 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
       });
       expect(existsSync(outputPath)).toBe(true);
       const fileText = readFileSync(outputPath, 'utf8');
+      // (b) No partial-line tail. The fsync(2)-after-each-write invariant
+      //     means the last byte on disk MUST be `\n` (the trailing
+      //     newline appended after JSON.stringify). If we ever see a
+      //     non-newline EOF, the harness was killed BETWEEN write and
+      //     fsync without the OS having flushed — which would mean the
+      //     M1 durability claim is false.
+      expect(fileText.endsWith('\n')).toBe(true);
       const lines = fileText.split('\n').filter((l) => l.trim().length > 0);
       // Must have at least 1 valid NDJSON record; must have STRICTLY
       // FEWER than 20 (proves the harness was actually killed mid-run,
@@ -528,12 +666,28 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
       // record at the tail). The fsync after each write guarantees
       // the partial line we'd see in a pure-buffered-stream scenario
       // is not visible here.
+      const records: Record<string, unknown>[] = [];
       for (const ln of lines) {
         expect(() => JSON.parse(ln)).not.toThrow();
         const obj = JSON.parse(ln) as Record<string, unknown>;
         expect(typeof obj['row_index']).toBe('number');
+        // (c) sanity check on file identity.
         expect(obj['mode']).toBe('mock');
+        records.push(obj);
       }
+      // (a) Surviving rows are consecutive from the start of the target
+      //     slice in ascending row_index order — no holes, no reordering.
+      //     The harness sorts indices ascending then takes first --rows=N
+      //     (see scripts/run-pipeline.ts: `indices.sort((a, b) => a - b)`
+      //     + `indices.slice(0, limit)`). The first 20 sorted indices of
+      //     `datasets/healthcare/with-injected-pii/ground-truth.jsonl`
+      //     are the fixture below — recompute via
+      //     `head ground-truth.jsonl | jq .row_index | sort -n | head -20`
+      //     if the dataset is ever regenerated. Locked here so this
+      //     load-bearing test never silently passes by luck.
+      const target = [18, 19, 41, 47, 78, 80, 100, 110, 136, 146, 158, 161, 164, 166, 174, 187, 206, 213, 218, 229];
+      const observedRowIndices = records.map((r) => r['row_index']);
+      expect(observedRowIndices).toEqual(target.slice(0, records.length));
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

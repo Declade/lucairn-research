@@ -33,7 +33,7 @@
  * Optional client-side rate limiting via `rateLimitRpm` paces calls at no more
  * than N requests per minute by gating every `runRow` dispatch on a
  * `60_000 / rpm` minimum-interval since the previous dispatch. This is a
- * coarse Anthropic-Tier-1-RPM-cap safety belt — Slice 2.5 M2; see
+ * coarse Anthropic-API-rate-limit-tier RPM-cap safety belt — Slice 2.5 M2; see
  * `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5 section).
  *
  * No real secret material is referenced at import time — env reads happen at
@@ -192,9 +192,14 @@ export interface GatewayClientOptions {
    */
   readonly rateLimitRpm?: number;
   /**
-   * Injected clock for the rate-limiter (test only). Defaults to
-   * `Date.now`. Exposed so the rate-limit unit test can advance time
-   * deterministically without sleeping.
+   * Injected clock for the rate-limiter. Returns a monotonic millisecond
+   * value used to gate per-row dispatches. Defaults to `performance.now()`
+   * (monotonic-since-process-start, immune to NTP step adjustments and
+   * DST jumps; the correct primitive for per-row interval gating). The
+   * contract is "any monotonic-non-decreasing number" — tests inject a
+   * virtual clock; production code SHOULD NOT pass `Date.now` because
+   * wall-clock adjustments can briefly reverse and cause the rate-limit
+   * gate to undercount the elapsed interval. MEDIUM-1 fix-up (2026-05-17).
    */
   readonly nowFn?: () => number;
   readonly fetchFn?: typeof fetch;
@@ -317,7 +322,11 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
   const fetchFn = options.fetchFn ?? fetch;
   const sleepFn = options.sleepFn ?? defaultSleep;
   const randomFn = options.randomFn ?? Math.random;
-  const nowFn = options.nowFn ?? Date.now;
+  // MEDIUM-1 (2026-05-17): default to `performance.now()` (monotonic),
+  // not `Date.now()` (wall-clock). Wall-clock is vulnerable to NTP step
+  // adjustments and DST jumps that can briefly reverse — both would cause
+  // the rate-limit gate to undercount the elapsed interval and burst.
+  const nowFn = options.nowFn ?? (() => performance.now());
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const backoffBase = options.backoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS;
@@ -398,10 +407,21 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
         clearTimeout(timeoutHandle);
         timeoutHandle = null;
         // HTTP 429 (Too Many Requests) is retry-eligible alongside 5xx —
-        // Slice 2.5 M2; Anthropic Tier-1 RPM caps surface as 429 from the
-        // upstream and propagate through the gateway. Other 4xx
+        // Slice 2.5 M2; Anthropic API rate-limit tier caps surface as 429
+        // from the upstream and propagate through the gateway. Other 4xx
         // (400/401/403/404/etc.) remain terminal — those are client-side
         // errors that won't fix themselves on retry.
+        //
+        // Gateway 429 surface (grep 2026-05-17 against
+        // `dual-sandbox-architecture/services/gateway/internal/middleware/ratelimit.go:101-114`
+        // + `services/gateway/internal/api/handler.go:159/184/218`): the
+        // gateway emits real HTTP 429 with `Retry-After: 60` header and a
+        // JSON body `{"error":"rate_limit_exceeded","retry_after_seconds":60}`.
+        // Upstream Anthropic 429s are mapped to HTTP 503 with
+        // `Retry-After`-derived `ErrInferenceServiceUnavailable(retrySeconds)`
+        // via the circuit-breaker path at
+        // `services/gateway/internal/api/proxy.go:748-755`, so they hit
+        // the 5xx branch here, not the 429 branch.
         if (response.status === 429 || response.status >= 500) {
           // Retry-eligible.
           const text = await safeReadText(response);
@@ -413,7 +433,19 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
               text,
             );
           }
-          await sleepFn(computeBackoffMs(attempt, backoffBase, backoffJitter, randomFn));
+          // HIGH-1 (2026-05-17): honor `Retry-After` header on 429
+          // responses (RFC 6585 / RFC 7231 §7.1.3). Anthropic returns
+          // `Retry-After: <seconds>` or `Retry-After: <HTTP-date>`; a real
+          // `Retry-After: 60` blows past our fixed exponential backoff
+          // (max ~1.9s across 2 retries) and chips into the 5% failure
+          // budget for no good reason. We honor the server's hint AND
+          // our own backoff floor via `Math.max(...)`, so we never sleep
+          // LESS than computed backoff (jitter still applies).
+          const computed = computeBackoffMs(attempt, backoffBase, backoffJitter, randomFn);
+          const retryAfterMs =
+            response.status === 429 ? parseRetryAfterMs(response.headers.get('retry-after'), nowFn) : null;
+          const sleepMs = retryAfterMs !== null ? Math.max(retryAfterMs, computed) : computed;
+          await sleepFn(sleepMs);
           continue;
         }
         if (response.status >= 400) {
@@ -471,6 +503,49 @@ function computeBackoffMs(
   const expo = baseMs * 2 ** (attempt - 1);
   const jitter = randomFn() * jitterMs;
   return Math.floor(expo + jitter);
+}
+
+/**
+ * Parse an RFC 7231 §7.1.3 `Retry-After` header value into milliseconds.
+ * Two forms supported:
+ *   - Delta-seconds (numeric, no decimal point): `Retry-After: 60` → 60_000 ms.
+ *   - HTTP-date (IMF-fixdate / obs-date): e.g. `Retry-After: Wed, 21 Oct
+ *     2026 07:28:00 GMT` → ms-until-that-timestamp, computed against
+ *     `nowMonotonicMs` as a stand-in (we don't have a true wall-clock
+ *     here — the rate-limit gate's `nowFn` is monotonic). For the
+ *     HTTP-date form we delegate to `Date.parse` (which returns
+ *     wall-clock-relative ms-since-epoch) and subtract `Date.now()` to
+ *     get the delta, which works regardless of which monotonic clock
+ *     the rate-limit gate uses.
+ * Returns null if the header is absent, blank, or unparseable. Returns 0
+ * if the parsed delay is non-positive (the server is asking us to retry
+ * immediately; caller's backoff floor still applies).
+ *
+ * HIGH-1 fix-up (2026-05-17). Reference test cases:
+ *   - `Retry-After: 5` → 5000
+ *   - `Retry-After: <wall-clock date 30s in the future>` → ~30000
+ *   - missing / `null` → null (caller falls back to computed backoff)
+ *   - non-numeric garbage → null (treated as "no hint")
+ */
+export function parseRetryAfterMs(
+  header: string | null,
+  _nowMonotonicMs: () => number,
+): number | null {
+  if (header === null) return null;
+  const trimmed = header.trim();
+  if (trimmed === '') return null;
+  // Delta-seconds form: pure digits (no decimal). RFC 7231 §7.1.3
+  // permits only digit-only seconds; we also tolerate a leading +.
+  if (/^[+-]?\d+$/u.test(trimmed)) {
+    const seconds = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(seconds)) return null;
+    return Math.max(0, seconds * 1000);
+  }
+  // HTTP-date form: hand off to Date.parse. NaN if unparseable.
+  const target = Date.parse(trimmed);
+  if (!Number.isFinite(target)) return null;
+  const delta = target - Date.now();
+  return Math.max(0, delta);
 }
 
 async function safeReadText(response: Response): Promise<string | null> {

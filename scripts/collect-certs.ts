@@ -110,12 +110,25 @@ async function main(): Promise<void> {
     lineNo += 1;
     const trimmed = ln.trim();
     if (trimmed === '') continue;
+    // BLOCKER-2 (2026-05-17): tolerate partial-line tails left by a
+    // SIGKILL between `writeStream.write` and `fsyncSync` in run-pipeline.
+    // Previous behaviour threw, which blocked the entire next pipeline
+    // step on a single trailing partial line — contradicting the
+    // run-pipeline doc-comment's "downstream consumers gracefully skip
+    // malformed lines" recovery contract. We skip-with-warn (NOT
+    // silent-skip) so operators retain visibility when a SIGKILL left
+    // partial output.
+    let record: PipelineNdjsonRecord;
     try {
-      records.push(JSON.parse(trimmed) as PipelineNdjsonRecord);
+      record = JSON.parse(trimmed) as PipelineNdjsonRecord;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new Error(`${cli.input}: line ${lineNo} is not valid JSON: ${reason}`);
+      process.stderr.write(
+        `[collect-certs] skipping malformed line ${lineNo} in ${cli.input}: ${reason}\n`,
+      );
+      continue;
     }
+    records.push(record);
   }
 
   // CERTIFICATES.csv schema. Slice 2 dispatch brief specified a 7-column

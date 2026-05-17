@@ -74,9 +74,11 @@ interface CliArgs {
    * Optional client-side rate-limit budget in requests-per-minute. Wired
    * through to `GatewayClientOptions.rateLimitRpm`. Default null disables
    * rate-limiting; the 500-row live-run dispatch should set this to the
-   * Anthropic Tier-1 RPM cap (typically 50 for first-tier accounts; the
-   * Slice 3 dispatch defaults to 10 for a conservative belt). Slice 2.5
-   * M2; see `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
+   * Anthropic API rate-limit tier's RPM cap (typically 50 for lower-quota
+   * accounts; the Slice 3 dispatch defaults to 10 for a conservative belt).
+   * Slice 2.5 M2; see `prd-2026-05-17-paper-1-autonomous-finish.md`
+   * (Slice 2.5). ("Tier" here = Anthropic's upstream-API-quota tier, NOT
+   * the locked Lucairn `Developer / Pro / Enterprise` product tier.)
    */
   rateLimitRpm: number | null;
   missRate: number;
@@ -197,7 +199,7 @@ function printHelp(): void {
     '  --rate-limit-rpm=N   Pace gateway calls at no more than N requests per minute (positive int).',
     '                       Sets a `60_000/N` ms minimum interval between consecutive row dispatches.',
     '                       Default unset = no rate-limit. Recommended for Slice 3 live runs to stay',
-    '                       under Anthropic Tier-1 RPM caps. Combines with the 429-retry policy.',
+    '                       under Anthropic API rate-limit tier RPM caps. Combines with the 429-retry policy.',
     '  --miss-rate=F        --mock only. Fraction of injected entities the mock misses. Default: 0.',
     '  --spurious-fp-count=N --mock only. Synthetic FP redactions per row. Default: 0.',
     '  --activity-id-prefix=S  per-row activity_id prefix. Default: paper-1-healthcare.',
@@ -381,11 +383,33 @@ async function main(): Promise<void> {
   // ~$3 of upstream LLM spend.
   //
   // Downstream NDJSON readers in `scripts/collect-certs.ts:109` +
-  // `scripts/compute-recall.ts:166` already gracefully skip empty/malformed
-  // lines via `trimmed === ''` guards, so a partial line written
-  // mid-process-death is also safely consumed.
+  // `scripts/compute-recall.ts:166` MUST tolerate a partial-line tail (a
+  // SIGKILL between `writeStream.write` and `fsyncSync` can leave a
+  // half-written line at EOF). Both readers wrap `JSON.parse(line)` in
+  // try/catch and skip-with-warn on malformed input (BLOCKER-2 fix-up,
+  // 2026-05-17). The empty-line guard `trimmed === ''` alone is NOT
+  // sufficient — a malformed-JSON tail would have thrown before this
+  // fix-up landed.
+  //
+  // BLOCKER-1 fix (2026-05-17): we capture the underlying file descriptor
+  // via the `'open'` event BEFORE entering the row loop. `createWriteStream`
+  // opens the fd asynchronously — `writeStream.fd` is `null` until the open
+  // event fires — so the previous `if (typeof writeStream.fd === 'number')`
+  // guard silently skipped fsync entirely while fd was null. The M1
+  // durability test was passing by OS write-buffering luck, not by the
+  // claimed fsync-per-row invariant. Empirical repro: every row on the
+  // --mock path observed `writeStream.fd === null`, so fsync never fired.
   const writeStream = createWriteStream(cli.output, { flags: 'w', encoding: 'utf8' });
+  let openFd: number | null = null;
+  await new Promise<void>((resolveOpen, rejectOpen) => {
+    writeStream.once('open', (fd: number) => {
+      openFd = fd;
+      resolveOpen();
+    });
+    writeStream.once('error', rejectOpen);
+  });
   let written = 0;
+  let fsyncWarned = false;
   const startedAt = Date.now();
   try {
     for (const rowIndex of target) {
@@ -427,18 +451,33 @@ async function main(): Promise<void> {
       await writeLine(writeStream, `${ndjsonLine}\n`);
       // fsync(2) every row — durability guarantee for the SIGTERM-mid-run
       // recovery story. Cost is ~ms per row, negligible vs gateway RTT.
-      const fd = (writeStream as unknown as { fd: number | null }).fd;
-      if (typeof fd === 'number') {
+      // BLOCKER-1: fd captured via 'open' event above (NOT via
+      // writeStream.fd which is async-null) so this fsync actually fires
+      // on every row. Warn ONCE to stderr if fsync errors (some filesystems
+      // — tmpfs, certain network mounts — don't support fsync; the write
+      // itself already succeeded so the row is in the OS page cache and
+      // visible to readers, just not durably on disk yet). MEDIUM-3 fix:
+      // single-warn pattern gives operators visibility without spamming.
+      if (openFd !== null) {
         try {
-          fsyncSync(fd);
-        } catch {
-          // fsync may fail on some filesystems (tmpfs, certain network
-          // mounts) — swallow; the write itself already succeeded.
+          fsyncSync(openFd);
+        } catch (err) {
+          if (!fsyncWarned) {
+            const reason = err instanceof Error ? err.message : String(err);
+            process.stderr.write(
+              `[run-pipeline] fsync unavailable on output fd (${reason}); ` +
+                `durability is best-effort for the remainder of this run\n`,
+            );
+            fsyncWarned = true;
+          }
         }
       }
       written += 1;
     }
   } finally {
+    // Close both the writeStream and the mock server here so a throw on
+    // any row's await still cleans up. Awaiting writeStream.end ensures
+    // the OS sees the final flush before we report `written` to stdout.
     await new Promise<void>((res) => writeStream.end(res));
     mock?.close();
   }
