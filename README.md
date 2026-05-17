@@ -12,9 +12,9 @@ Empirical methodology code for the Lucairn Research Program — a per-industry s
 ## What this repo is NOT
 
 - Not a Lucairn product. The Lucairn platform itself lives elsewhere (gateway, sanitizer, witness, certificate verifier).
-- Not a customer-deployment artifact. These are vendor-published methodology papers; the publisher and the methodology are named in full. No customer attribution. No testimonials. No interviewed users.
+- Not a customer-deployment artifact. These are vendor-published methodology papers; the publisher and the methodology are named in full. No customer attribution. No persona-driven narrative.
 - Not a CLI or a publishable npm package. It is a methodology codebase, run from a clone.
-- Not a "case study". The artifact frame is a vendor benchmark / methodology paper; the word "case study" does not appear in any paper title, route slug, social card, or meta description.
+- Not a customer-implementation report. The artifact frame is a vendor benchmark / methodology paper; persona-driven or implementation-report framing does not appear in any paper title, route slug, social card, or meta description.
 - Not legal advice. Regulatory references are factual citations to primary sources (EUR-Lex Regulation 2024/1689; HHS HIPAA Safe Harbor enumeration; published clinical-NLP de-identification literature); they are not interpretations.
 
 ## Regulatory context
@@ -55,6 +55,34 @@ Prerequisites:
 - Node.js ≥ 18.17 (matches `package.json` `engines.node`)
 - pnpm 10.x
 - Kaggle CLI installed (`pipx install kaggle`) with a working `~/.kaggle/kaggle.json` API token
+
+### Slice 2 — Harness (mock-only)
+
+Slice 2 adds an in-process harness that calls the Lucairn gateway row-by-row via `POST /api/v1/proxy/messages` in `mode: "proving_ground"`, collects each row's signed cert URL, and computes per-HIPAA-category recall against the Measurement-B ground truth.
+
+**The harness is currently mock-only.** The live `gateway.lucairn.eu` run lands in Slice 3 per the locked PRD halt gate (avoid Anthropic upstream cost on every iteration). Run the in-process smoke flow:
+
+```bash
+# Step 1 — call the mock gateway over 5 rows; write the raw NDJSON.
+pnpm run pipeline -- --rows=5 --mock --output=/tmp/slice2-smoke.ndjson
+
+# Step 2 — convert NDJSON to the CERTIFICATES.csv appendix shape.
+pnpm run collect-certs -- --input=/tmp/slice2-smoke.ndjson --output=/tmp/slice2-CERTIFICATES.csv
+
+# Step 3 — compute recall / precision / F1, validate against the SUMMARY schema.
+pnpm run compute-recall \
+  -- --truth=datasets/healthcare/with-injected-pii/ground-truth.jsonl \
+  --redactions-source=mock \
+  --rows=5 \
+  --output=/tmp/slice2-SUMMARY.json
+```
+
+Mock options exercise the math layer against a known oracle:
+
+- `--miss-rate=0.3` — mock drops 30% of injected entities so recall and F1 reflect the configuration.
+- `--spurious-fp-count=2` — mock emits 2 synthetic false-positive redactions per row.
+
+The harness implementation reads `LUCAIRN_GATEWAY_URL` and `LUCAIRN_API_KEY` from the environment but Slice 2 supports `--mock` only; the `--live` flag is reserved for Slice 3 and refuses to run without the explicit invocation that the live-run halt gate authorises.
 
 ## Methodology summary (Paper 1)
 
