@@ -19,6 +19,10 @@
  *       (ground_truth_evaluation field emission)
  *     - dual-sandbox-architecture/services/gateway/internal/api/ground_truth.go:5-138
  *       (groundTruthResult + per-item shapes)
+ *     - dual-sandbox-architecture/services/gateway/internal/api/proxy.go:349-354
+ *       (BYOK-per-request gate — returns 400 missing_upstream_key when the
+ *       customer profile requires per-request upstream keys and the
+ *       X-Upstream-Key header is absent).
  *
  * The retry policy is 2 retries with exponential backoff (base 500 ms, jitter
  * 0–200 ms) on 5xx and connection errors only. 4xx errors are surfaced
@@ -156,6 +160,17 @@ export interface GatewayRowResult {
 export interface GatewayClientOptions {
   readonly gatewayUrl: string;
   readonly apiKey: string;
+  /**
+   * Upstream LLM API key for BYOK-per-request customer profiles. When set,
+   * emitted as the `X-Upstream-Key` HTTP header on every request. Required
+   * for Slice 3 live runs when the Lucairn customer profile has
+   * `ByokPerRequest: true` — the gateway returns a 400
+   * `missing_upstream_key` otherwise (see
+   *   dual-sandbox-architecture/services/gateway/internal/api/proxy.go:349-354
+   * for the gate). May be supplied via the `LUCAIRN_UPSTREAM_KEY` env var as
+   * a fallback when not set explicitly.
+   */
+  readonly upstreamKey?: string;
   readonly activityIdPrefix?: string;
   readonly requestTimeoutMs?: number;
   readonly maxRetries?: number;
@@ -198,21 +213,56 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * Minimum trimmed length of a ground-truth annotation value the harness will
+ * submit to the gateway. Defensive guard against future Faker regressions —
+ * the gateway's matcher (`compareGroundTruth` at
+ *   dual-sandbox-architecture/services/gateway/internal/api/ground_truth.go:82-95
+ * ) drops empty-after-trim values but NOT 1- or 2-char values. A 1-2 char
+ * value used as a containment-match needle has a high prior on spurious
+ * matches (e.g. annotation `value: "X"` matches every sanitizer redaction
+ * whose Original contains the letter X). Faker outputs in
+ * `inject-pii-core.ts:122-161` empirically always emit values ≥3 chars per
+ * category, but pinning the floor here protects against silent regressions.
+ */
+const MIN_GROUND_TRUTH_VALUE_LENGTH = 3;
+
+/**
  * Construct an annotation list suitable for the proving-ground ground_truth
  * field. The keying field name is fixed at `transcription` because that is
  * the single context field we route through the sanitizer.
+ *
+ * Filters out annotations whose `value.trim().length` is below
+ * MIN_GROUND_TRUTH_VALUE_LENGTH and emits a single console.warn with the
+ * dropped count (never the dropped values — those are PII even when
+ * synthetic). The filter rationale + cite-back live on
+ * MIN_GROUND_TRUTH_VALUE_LENGTH above.
  */
 function buildGroundTruth(
   entities: readonly InjectedEntity[],
 ): Record<string, ProvingGroundAnnotation[]> {
-  return {
-    transcription: entities.map((e) => ({
+  const kept: ProvingGroundAnnotation[] = [];
+  let droppedCount = 0;
+  for (const e of entities) {
+    if (e.value.trim().length < MIN_GROUND_TRUTH_VALUE_LENGTH) {
+      droppedCount += 1;
+      continue;
+    }
+    kept.push({
       type: e.category,
       value: e.value,
       start: e.start_char,
       end: e.end_char,
-    })),
-  };
+    });
+  }
+  if (droppedCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[gateway-client] dropped ${droppedCount} ground-truth annotation(s) ` +
+        `with value.trim().length < ${MIN_GROUND_TRUTH_VALUE_LENGTH} (containment-match safety; see ` +
+        `ground_truth.go:82-95)`,
+    );
+  }
+  return { transcription: kept };
 }
 
 /**
@@ -253,6 +303,13 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
   const activityPrefix = options.activityIdPrefix ?? 'paper-1-healthcare';
   const model = options.model ?? DEFAULT_MODEL;
   const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+  // Empty-string upstreamKey is treated as "absent" so callers can pass
+  // `process.env.LUCAIRN_UPSTREAM_KEY ?? ''` without accidentally emitting a
+  // header with no value.
+  const upstreamKey =
+    typeof options.upstreamKey === 'string' && options.upstreamKey.length > 0
+      ? options.upstreamKey
+      : null;
   const endpoint = `${options.gatewayUrl.replace(/\/+$/u, '')}/api/v1/proxy/messages`;
 
   async function runRow(row: GatewayRowInput): Promise<GatewayRowResult> {
@@ -279,12 +336,16 @@ export function makeGatewayClient(options: GatewayClientOptions): GatewayClient 
         timeoutHandle = setTimeout(() => {
           controller?.abort();
         }, timeoutMs);
+        const headers: Record<string, string> = {
+          'content-type': 'application/json',
+          'x-api-key': options.apiKey,
+        };
+        if (upstreamKey !== null) {
+          headers['x-upstream-key'] = upstreamKey;
+        }
         const response = await fetchFn(endpoint, {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-api-key': options.apiKey,
-          },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -369,16 +430,22 @@ async function safeReadText(response: Response): Promise<string | null> {
 }
 
 /**
- * Read gateway URL + API key from process.env. Returns null fields if unset
- * so callers can decide whether to enter mock mode or fail.
+ * Read gateway URL + API key + optional upstream LLM API key from
+ * process.env. Returns null fields if unset so callers can decide whether to
+ * enter mock mode or fail. `upstreamKey` is sourced from
+ * `LUCAIRN_UPSTREAM_KEY` and is required for BYOK-per-request customer
+ * profiles in Slice 3 live runs (see `GatewayClientOptions.upstreamKey`
+ * for the gate cite-back).
  */
 export function readGatewayEnv(env: NodeJS.ProcessEnv = process.env): {
   gatewayUrl: string | null;
   apiKey: string | null;
+  upstreamKey: string | null;
   requestTimeoutMs: number | null;
 } {
   const url = env.LUCAIRN_GATEWAY_URL ?? null;
   const key = env.LUCAIRN_API_KEY ?? null;
+  const upstreamKey = env.LUCAIRN_UPSTREAM_KEY ?? null;
   const timeoutStr = env.LUCAIRN_REQUEST_TIMEOUT_MS ?? null;
   let timeoutMs: number | null = null;
   if (timeoutStr !== null) {
@@ -387,5 +454,5 @@ export function readGatewayEnv(env: NodeJS.ProcessEnv = process.env): {
       timeoutMs = parsed;
     }
   }
-  return { gatewayUrl: url, apiKey: key, requestTimeoutMs: timeoutMs };
+  return { gatewayUrl: url, apiKey: key, upstreamKey, requestTimeoutMs: timeoutMs };
 }

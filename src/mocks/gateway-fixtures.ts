@@ -32,26 +32,47 @@ export interface MockBuilderOptions {
   readonly spuriousFpCount?: number;
 }
 
-const PLACEHOLDER_FOR_CATEGORY: Readonly<Record<string, string>> = {
+/**
+ * Map from HIPAA Safe Harbor category to the LIVE placeholder prefix the
+ * Lucairn sanitizer would emit in production for that category. Source of
+ * truth for these mappings:
+ *   dual-sandbox-architecture/services/sanitizer/presidio_scan.py:31-58
+ *   (PRESIDIO_TO_PLACEHOLDER dict).
+ *
+ * Locked decisions:
+ *   - FAX uses the same PHONE prefix the sanitizer emits for phone numbers
+ *     (the sanitizer does not natively distinguish FAX from PHONE — fax
+ *     numbers match the PHONE recognizer).
+ *   - MRN, HEALTH_PLAN_ID, LICENSE_NUMBER, VEHICLE_ID, DEVICE_ID,
+ *     IP_ADDRESS, BIOMETRIC_ID, FACE_PHOTO_REF, OTHER_UNIQUE_ID all collapse
+ *     to the sanitizer's ID bucket. The mock therefore emits [ID_N] for
+ *     these — matching production behavior. Their FP attribution surfaces
+ *     in the unmapped_extras accounting (recall.ts:142-167), NOT in the
+ *     per-category HIPAA buckets, exactly as the live path behaves.
+ *   - ACCOUNT_NUMBER picks IBAN deterministically (CC is the alternative).
+ *     Both map back to ACCOUNT_NUMBER via LUCAIRN_TO_HIPAA, so the test
+ *     bookkeeping is symmetric.
+ */
+const PLACEHOLDER_FOR_CATEGORY: Readonly<Record<string, string>> = Object.freeze({
   NAME: 'PERSON',
   GEO_SUBDIVISION: 'LOCATION',
-  DATE: 'DATE',
-  PHONE: 'PHONE_NUMBER',
-  FAX: 'FAX_NUMBER',
-  EMAIL: 'EMAIL_ADDRESS',
-  SSN: 'US_SSN',
-  MRN: 'MEDICAL_RECORD_NUMBER',
-  HEALTH_PLAN_ID: 'HEALTH_PLAN_ID',
-  ACCOUNT_NUMBER: 'ACCOUNT_NUMBER',
-  LICENSE_NUMBER: 'LICENSE_NUMBER',
-  VEHICLE_ID: 'VEHICLE_ID',
-  DEVICE_ID: 'DEVICE_ID',
+  DATE: 'DOB',
+  PHONE: 'PHONE',
+  FAX: 'PHONE', // sanitizer doesn't natively distinguish fax from phone
+  EMAIL: 'EMAIL',
+  SSN: 'SSN',
+  MRN: 'ID', // sanitizer collapses to ID bucket
+  HEALTH_PLAN_ID: 'ID', // sanitizer collapses to ID bucket
+  ACCOUNT_NUMBER: 'IBAN', // deterministic choice; CC is the alternative
+  LICENSE_NUMBER: 'ID', // sanitizer collapses to ID bucket
+  VEHICLE_ID: 'ID', // sanitizer collapses to ID bucket
+  DEVICE_ID: 'ID', // sanitizer collapses to ID bucket
   URL: 'URL',
-  IP_ADDRESS: 'IP_ADDRESS',
-  BIOMETRIC_ID: 'BIOMETRIC_ID',
-  FACE_PHOTO_REF: 'FACE_PHOTO_REF',
-  OTHER_UNIQUE_ID: 'STUDY_ID',
-};
+  IP_ADDRESS: 'ID', // sanitizer collapses IP_ADDRESS to ID (presidio_scan.py:51)
+  BIOMETRIC_ID: 'ID', // sanitizer collapses to ID bucket
+  FACE_PHOTO_REF: 'ID', // sanitizer collapses to ID bucket
+  OTHER_UNIQUE_ID: 'ID', // sanitizer collapses to ID bucket
+});
 
 /**
  * Build a mock gateway response for a single row. Determinism: given the
@@ -88,8 +109,12 @@ export function buildMockResponse(options: MockBuilderOptions): GatewayResponse 
   const extras: GroundTruthExtra[] = [];
   for (let i = 0; i < spuriousFpCount; i++) {
     // Synthesise plausible-looking spurious detections so FP-handling code
-    // paths can be exercised. Use deterministic pseudo-text.
-    const internalType = ['PERSON', 'LOCATION', 'PHONE_NUMBER'][i % 3] ?? 'PERSON';
+    // paths can be exercised. Use deterministic pseudo-text. The prefix
+    // rotation includes `ID` so the unmapped_extras accounting path
+    // (recall.ts:142-167) is exercised on at least one of every 4 synthetic
+    // FPs — mirroring production where `[ID_N]` is a common collapse-bucket
+    // placeholder for the sanitizer.
+    const internalType = ['PERSON', 'LOCATION', 'PHONE', 'ID'][i % 4] ?? 'PERSON';
     const nextN = (seqByType.get(internalType) ?? 0) + 1;
     seqByType.set(internalType, nextN);
     extras.push({

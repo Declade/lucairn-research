@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Declade/lucairn-research/papers/_template/SUMMARY.schema.json",
   "title": "Lucairn Research Program — per-paper SUMMARY.json",
-  "description": "Aggregate recall / precision / F1 numbers per HIPAA Safe Harbor category + overall + per-row breakdown for any paper in the Lucairn Research Program. Mirrors the RecallSummary shape produced by src/recall.ts.",
+  "description": "Aggregate recall / precision / F1 numbers per HIPAA Safe Harbor category + overall + per-row breakdown for any paper in the Lucairn Research Program. Mirrors the RecallSummary shape produced by src/recall.ts. Recall numbers are produced by the gateway's compareGroundTruth function at services/gateway/internal/api/ground_truth.go:69-138 in the dual-sandbox-architecture repo (case-insensitive bidirectional value-containment with whitespace normalization, server-side; not span-exact overlap). The publisher (Lucairn) ships this matcher in production; the research repo aggregates its verdicts.",
   "type": "object",
   "required": [
     "schema_version",

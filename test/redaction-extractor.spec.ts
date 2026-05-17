@@ -29,15 +29,34 @@ describe('parsePlaceholderType', () => {
 });
 
 describe('placeholderToHipaaCategory', () => {
-  it('maps Lucairn internal types to HIPAA Safe Harbor categories', () => {
+  it('maps Lucairn LIVE placeholder prefixes to HIPAA Safe Harbor categories', () => {
+    // Live placeholder prefixes from presidio_scan.py:31-58
+    // PRESIDIO_TO_PLACEHOLDER right-hand-side values.
     expect(placeholderToHipaaCategory('[PERSON_1]')).toBe('NAME');
     expect(placeholderToHipaaCategory('[LOCATION_2]')).toBe('GEO_SUBDIVISION');
-    expect(placeholderToHipaaCategory('[PHONE_NUMBER_3]')).toBe('PHONE');
-    expect(placeholderToHipaaCategory('[EMAIL_ADDRESS_4]')).toBe('EMAIL');
-    expect(placeholderToHipaaCategory('[US_SSN_5]')).toBe('SSN');
+    expect(placeholderToHipaaCategory('[PHONE_3]')).toBe('PHONE');
+    expect(placeholderToHipaaCategory('[EMAIL_4]')).toBe('EMAIL');
+    expect(placeholderToHipaaCategory('[SSN_5]')).toBe('SSN');
     expect(placeholderToHipaaCategory('[IBAN_6]')).toBe('ACCOUNT_NUMBER');
-    expect(placeholderToHipaaCategory('[URL_7]')).toBe('URL');
-    expect(placeholderToHipaaCategory('[IP_ADDRESS_8]')).toBe('IP_ADDRESS');
+    expect(placeholderToHipaaCategory('[CC_7]')).toBe('ACCOUNT_NUMBER');
+    expect(placeholderToHipaaCategory('[URL_8]')).toBe('URL');
+    expect(placeholderToHipaaCategory('[DOB_9]')).toBe('DATE');
+  });
+
+  it('null-maps [ID_N] and [SECRET_N] by design (documented limitation)', () => {
+    // [ID_N] is the sanitizer's collapse-bucket for MRN, US_BANK_NUMBER,
+    // US_PASSPORT, US_DRIVER_LICENSE, UK_NHS, SG_NRIC_FIN, AU_ABN, AU_TFN,
+    // AU_MEDICARE, IN_PAN, IP_ADDRESS + 4 German custom recognizers, AND the
+    // unknown-entity fallback (cite-back: presidio_scan.py:31-58). The
+    // placeholder shape cannot disambiguate the underlying HIPAA category, so
+    // null-mapping is the correct behavior — the FP count surfaces in the
+    // unmapped_extras accounting (recall.ts:142-167) instead of being
+    // silently misattributed.
+    expect(placeholderToHipaaCategory('[ID_1]')).toBeNull();
+    // [SECRET_N] (W5+ Phase 1, 2026-05-09) is detect-secrets + SaaS-API-key
+    // matches; secrets are not a HIPAA Safe Harbor category in the
+    // 18-enumeration sense (45 CFR § 164.514(b)(2)(i)).
+    expect(placeholderToHipaaCategory('[SECRET_1]')).toBeNull();
   });
 
   it('returns null for placeholders whose internal type is not in the map', () => {
@@ -47,6 +66,32 @@ describe('placeholderToHipaaCategory', () => {
 });
 
 describe('LUCAIRN_TO_HIPAA mapping', () => {
+  // Live placeholder prefix vocabulary from
+  //   dual-sandbox-architecture/services/sanitizer/presidio_scan.py:31-58
+  // (PRESIDIO_TO_PLACEHOLDER dict right-hand-side values). Hard-coded here so
+  // any future addition to that dict that this repo hasn't accounted for
+  // surfaces as a test failure, not as silent FP miscategorization.
+  const LIVE_PLACEHOLDER_PREFIXES = [
+    'PERSON',
+    'EMAIL',
+    'PHONE',
+    'LOCATION',
+    'IBAN',
+    'CC',
+    'SSN',
+    'ID',
+    'URL',
+    'DOB',
+    'SECRET',
+  ] as const;
+
+  // Prefixes intentionally NOT mapped — see hipaa-category-mapping.ts
+  // file-level doc-comment for the rationale.
+  const KNOWN_UNMAPPED: ReadonlySet<string> = new Set([
+    'ID', // collapse-bucket for many distinct HIPAA categories; disambiguation impossible from placeholder alone
+    'SECRET', // not a HIPAA Safe Harbor category in the 18-enumeration sense
+  ]);
+
   it('every right-hand side is a valid HipaaCategory', () => {
     const valid = new Set<string>(HIPAA_CATEGORIES);
     for (const [internalType, hipaa] of Object.entries(LUCAIRN_TO_HIPAA)) {
@@ -54,24 +99,31 @@ describe('LUCAIRN_TO_HIPAA mapping', () => {
     }
   });
 
-  it('covers the standard Presidio/Lucairn vocabulary the gateway emits', () => {
-    // Smoke list of internal types observed in proxy.go::extractEntityTypes
-    // and the Presidio recognizer catalogue. Any future regression where one
-    // of these disappears from the mapping is a Slice 3 hazard.
-    const required = [
-      'PERSON',
-      'LOCATION',
-      'DATE',
-      'PHONE_NUMBER',
-      'EMAIL_ADDRESS',
-      'US_SSN',
-      'IBAN',
-      'URL',
-      'IP_ADDRESS',
-      'CREDIT_CARD',
-    ];
-    for (const t of required) {
-      expect(LUCAIRN_TO_HIPAA[t], `mapping missing for ${t}`).toBeTruthy();
+  it('every live placeholder prefix is either mapped or explicitly null-mapped', () => {
+    // Walk the live vocabulary; each prefix must either appear in
+    // LUCAIRN_TO_HIPAA OR be listed in KNOWN_UNMAPPED. This is the regression
+    // lock against `presidio_scan.py:31-58` drift.
+    for (const prefix of LIVE_PLACEHOLDER_PREFIXES) {
+      const mapped = LUCAIRN_TO_HIPAA[prefix] !== undefined;
+      const unmappedIntentionally = KNOWN_UNMAPPED.has(prefix);
+      expect(
+        mapped || unmappedIntentionally,
+        `prefix ${prefix} (from presidio_scan.py:31-58) must be in LUCAIRN_TO_HIPAA or KNOWN_UNMAPPED`,
+      ).toBe(true);
+    }
+  });
+
+  it('no prefix in LUCAIRN_TO_HIPAA is outside the live placeholder vocabulary', () => {
+    // Inverse guard — if someone adds a stale alias (e.g. PHONE_NUMBER or
+    // EMAIL_ADDRESS) to the mapping table, it must correspond to something
+    // the sanitizer actually emits. Otherwise the entry is dead code masking
+    // real drift.
+    const liveSet = new Set<string>(LIVE_PLACEHOLDER_PREFIXES);
+    for (const internalType of Object.keys(LUCAIRN_TO_HIPAA)) {
+      expect(
+        liveSet.has(internalType),
+        `LUCAIRN_TO_HIPAA[${internalType}] is not in the live placeholder vocabulary (presidio_scan.py:31-58)`,
+      ).toBe(true);
     }
   });
 });

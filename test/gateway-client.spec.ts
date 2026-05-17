@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
@@ -11,7 +11,11 @@ import type { GatewayResponse } from '../src/gateway-client.js';
 
 const BASE_URL = 'http://gateway.test.local';
 const ENDPOINT = `${BASE_URL}/api/v1/proxy/messages`;
-const API_KEY = 'lcr_live_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+// Synthetic test key. Uses an `lcr_test_` prefix (NOT `lcr_live_`) so the
+// real production key prefix never appears in committed test code — that
+// avoids triggering downstream secret scanners (truffleHog, gitleaks,
+// GitHub secret scanning) once this repo flips public.
+const API_KEY = 'lcr_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 function successResponse(overrides?: Partial<GatewayResponse>): GatewayResponse {
   return {
@@ -219,5 +223,102 @@ describe('makeGatewayClient', () => {
     expect(() => makeGatewayClient({ gatewayUrl: BASE_URL, apiKey: '' })).toThrow(
       /apiKey is required/u,
     );
+  });
+
+  it('emits X-Upstream-Key header when upstreamKey is set (Slice 3 BYOK gate)', async () => {
+    // Locks the contract for `dual-sandbox-architecture/services/gateway/
+    // internal/api/proxy.go:349-354` BYOK-per-request profile gate.
+    let observedUpstreamHeader: string | null = null;
+    server.use(
+      http.post(ENDPOINT, async ({ request }) => {
+        observedUpstreamHeader = request.headers.get('x-upstream-key');
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const client = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      upstreamKey: 'sk-ant-api03-fake-upstream-test-value',
+      sleepFn: async () => undefined,
+    });
+    await client.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    expect(observedUpstreamHeader).toBe('sk-ant-api03-fake-upstream-test-value');
+  });
+
+  it('omits X-Upstream-Key header when upstreamKey is absent or empty', async () => {
+    let observedUpstreamHeader: string | null = 'sentinel';
+    server.use(
+      http.post(ENDPOINT, async ({ request }) => {
+        observedUpstreamHeader = request.headers.get('x-upstream-key');
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    const clientUnset = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      sleepFn: async () => undefined,
+    });
+    await clientUnset.runRow({ row_index: 0, transcription: 'x', entities: [] });
+    // msw / fetch surface absent headers as null.
+    expect(observedUpstreamHeader).toBeNull();
+
+    observedUpstreamHeader = 'sentinel';
+    const clientEmpty = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      upstreamKey: '', // explicitly empty must be treated as "absent"
+      sleepFn: async () => undefined,
+    });
+    await clientEmpty.runRow({ row_index: 0, transcription: 'y', entities: [] });
+    expect(observedUpstreamHeader).toBeNull();
+  });
+
+  it('filters ground-truth annotations with value.trim().length < 3 (H2 containment-match safety)', async () => {
+    // Defensive guard against future Faker regression — see
+    // src/gateway-client.ts::MIN_GROUND_TRUTH_VALUE_LENGTH and the
+    // ground_truth.go:82-95 cite-back. The gateway's compareGroundTruth
+    // drops empty-after-trim values but NOT 1-2 char values, so a 1-2 char
+    // needle would containment-match into many redactions spuriously.
+    let observedAnnotations: unknown[] = [];
+    server.use(
+      http.post(ENDPOINT, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        const gt = body['ground_truth'] as { transcription: unknown[] };
+        observedAnnotations = gt.transcription;
+        return HttpResponse.json(successResponse());
+      }),
+    );
+    // Silence the expected console.warn so the test output stays clean
+    // while still verifying the filter fired.
+    const warnSpy = vi
+      .spyOn(console, 'warn')
+      .mockImplementation((): void => undefined);
+    const client = makeGatewayClient({
+      gatewayUrl: BASE_URL,
+      apiKey: API_KEY,
+      sleepFn: async () => undefined,
+    });
+    await client.runRow({
+      row_index: 0,
+      transcription: 'short note',
+      entities: [
+        // length-1 — must be dropped.
+        { category: 'NAME', value: 'X', start_char: 0, end_char: 1 },
+        // length-2 after trim — must be dropped.
+        { category: 'NAME', value: ' AB ', start_char: 0, end_char: 4 },
+        // length-3 — must survive.
+        { category: 'EMAIL', value: 'a@b', start_char: 5, end_char: 8 },
+      ],
+    });
+    expect(observedAnnotations).toHaveLength(1);
+    const kept = observedAnnotations[0] as Record<string, unknown>;
+    expect(kept['type']).toBe('EMAIL');
+    expect(kept['value']).toBe('a@b');
+    // Warning fired with the dropped count, NOT the dropped values.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const firstArg = warnSpy.mock.calls[0]?.[0];
+    expect(typeof firstArg).toBe('string');
+    expect(firstArg as string).toMatch(/dropped 2 ground-truth annotation\(s\)/u);
+    warnSpy.mockRestore();
   });
 });

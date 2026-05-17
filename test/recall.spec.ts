@@ -91,6 +91,36 @@ describe('aggregateExtracted', () => {
     expect(byCat.get('NAME')?.tp).toBe(1);
   });
 
+  it('routes [ID_N] FPs into the unmapped bucket (documented collapse-bucket limitation)', () => {
+    // [ID_N] is the sanitizer's collapse-bucket for many distinct HIPAA
+    // categories (MRN, HEALTH_PLAN_ID, ACCOUNT_NUMBER, LICENSE_NUMBER,
+    // IP_ADDRESS, OTHER_UNIQUE_ID, +4 German custom recognizers + unknown
+    // fallback — cite-back: presidio_scan.py:31-58). The placeholder shape
+    // alone cannot disambiguate the underlying category, so by design
+    // [ID_N] FPs surface in the overall.fp count + the unmapped notes,
+    // NOT in any per_category bucket. This guards against silent
+    // misattribution if a future change tries to "fix" the null-mapping.
+    const extracted: ExtractedRedaction[] = [
+      // hipaa_category null because extractFromEvaluation called
+      // placeholderToHipaaCategory('[ID_1]') and got null back.
+      {
+        row_index: 1,
+        hipaa_category: null,
+        verdict: 'fp',
+        value: 'spurious-id-string',
+        placeholder: '[ID_1]',
+        field: null,
+      },
+    ];
+    const summary = aggregateExtracted(extracted);
+    expect(summary.overall.fp).toBe(1);
+    expect(summary.notes.some((n) => /no HIPAA category mapping/iu.test(n))).toBe(true);
+    // None of the 18 HIPAA categories has fp > 0.
+    for (const entry of summary.per_category) {
+      expect(entry.counts.fp).toBe(0);
+    }
+  });
+
   it('treats absent ground truth as recall=0 with total_annotations=0', () => {
     const summary = aggregateExtracted([]);
     expect(summary.overall.total_annotations).toBe(0);

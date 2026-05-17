@@ -1,116 +1,89 @@
 /**
  * hipaa-category-mapping.ts
  *
- * Maps Lucairn's internal sanitizer placeholder types (the `[TYPE_N]` shape)
- * back to the 18 HIPAA Safe Harbor categories defined in
- * `src/inject-pii-core.ts:28-47` (45 CFR § 164.514(b)(2)(i)).
+ * Maps Lucairn's LIVE placeholder prefixes (the `[PREFIX_N]` shape emitted by
+ * the sanitizer in production) back to the 18 HIPAA Safe Harbor categories
+ * defined in `src/inject-pii-core.ts:28-47` (45 CFR § 164.514(b)(2)(i)).
  *
  * Why this exists:
  *   The Lucairn sanitizer emits redactions whose `placeholder` field is of the
- *   form `[TYPE_N]` where TYPE is an internal taxonomy term (PERSON, LOCATION,
- *   PHONE_NUMBER, etc.). The HIPAA Safe Harbor enumeration is the standard the
- *   research program reports recall against. This module is the documented
- *   bridge between the two taxonomies.
+ *   form `[PREFIX_N]` where PREFIX comes from the `PRESIDIO_TO_PLACEHOLDER`
+ *   dict in
+ *     dual-sandbox-architecture/services/sanitizer/presidio_scan.py:31-58
+ *   (i.e. one of the 11 LIVE values: PERSON, EMAIL, PHONE, LOCATION, IBAN, CC,
+ *   SSN, ID, URL, DOB, SECRET — confirmed by the placeholder-emit format at
+ *   `placeholders.py:52` `f"[{pii_type}_{count}]"`). The HIPAA Safe Harbor
+ *   enumeration is the standard the research program reports recall against.
+ *   This module is the documented bridge between the two taxonomies.
  *
- * Cite-back: gateway emits `placeholder` per redaction at
- *   `dual-sandbox-architecture/services/gateway/internal/api/ground_truth.go:48-56`
- * and the placeholder parsing convention at
- *   `dual-sandbox-architecture/services/gateway/internal/api/proxy.go:1361-1395`
- * (extractEntityTypes — accepts `[TYPE_N]` where TYPE is one or more
- * uppercase letters/underscores).
+ * Cite-back:
+ *   - Live placeholder vocabulary (source-of-truth):
+ *       dual-sandbox-architecture/services/sanitizer/presidio_scan.py:31-58
+ *       (`PRESIDIO_TO_PLACEHOLDER` dict)
+ *   - Placeholder emit format `[{pii_type}_{count}]`:
+ *       dual-sandbox-architecture/services/sanitizer/placeholders.py:52
+ *   - Gateway emits `placeholder` per redaction at:
+ *       dual-sandbox-architecture/services/gateway/internal/api/ground_truth.go:48-56
+ *   - Gateway's own parsing convention `[TYPE_N]`:
+ *       dual-sandbox-architecture/services/gateway/internal/api/proxy.go:1361-1395
+ *       (extractEntityTypes — accepts uppercase letters/underscores + digits suffix).
  *
- * The mapping is intentionally explicit and one-way (internal → HIPAA). If
- * Lucairn introduces a new sanitizer type, this table MUST be extended before
- * Paper 1 numbers are re-published — an unmapped placeholder is a recall
- * accounting gap, not a silent passthrough.
+ * IMPORTANT — what this table is used for:
+ *   The harness's TP and FN attribution flow through the ground-truth
+ *   annotation's HIPAA `annotation_type` (since the harness submits HIPAA
+ *   categories as `ProvingGroundAnnotation.type`), NOT through this table.
+ *   This table is consulted only for FALSE POSITIVES surfaced in
+ *   `extras[].placeholder` — where the gateway returns the placeholder the
+ *   sanitizer emitted, and the harness needs to attribute the FP to a HIPAA
+ *   category bucket.
+ *
+ * Documented limitations:
+ *   - `[ID_N]` is the sanitizer's COLLAPSE bucket for many distinct Presidio
+ *     entity types (MRN-shaped, US_BANK_NUMBER, US_PASSPORT,
+ *     US_DRIVER_LICENSE, UK_NHS, SG_NRIC_FIN, AU_ABN, AU_TFN, AU_MEDICARE,
+ *     IN_PAN, IP_ADDRESS, the four custom German recognizers Fallnummer /
+ *     Personalausweis / Steuer-ID / SVNR, AND the unknown-entity fallback).
+ *     These map to at least six different HIPAA categories (MRN,
+ *     HEALTH_PLAN_ID, ACCOUNT_NUMBER, LICENSE_NUMBER, IP_ADDRESS,
+ *     OTHER_UNIQUE_ID). The placeholder shape alone cannot disambiguate them.
+ *     `placeholderToHipaaCategory('[ID_N]')` therefore returns `null` by
+ *     design.
+ *   - `[SECRET_N]` is the W5+ Phase 1 (2026-05-09) detect-secrets +
+ *     SaaS-API-key bucket. Secrets are not a HIPAA Safe Harbor category in
+ *     the 18-enumeration sense (45 CFR § 164.514(b)(2)(i)).
+ *     `placeholderToHipaaCategory('[SECRET_N]')` returns `null` by design.
+ *
+ * FP counts whose placeholder maps to null surface in the
+ * `unmappedExtraTypes()` accounting in `src/redaction-extractor.ts:111-127`
+ * and `src/recall.ts:142-167` so they remain visible in the SUMMARY notes
+ * rather than being silently dropped.
  */
 
 import type { HipaaCategory } from './inject-pii-core.js';
 
 /**
- * The exhaustive mapping from Lucairn internal sanitizer types to HIPAA Safe
- * Harbor categories.
+ * The mapping from Lucairn LIVE placeholder prefixes (per
+ * `presidio_scan.py:31-58`) to HIPAA Safe Harbor categories.
  *
- * Sources for the right-hand-side category assignments:
- *  - 45 CFR § 164.514(b)(2)(i) Safe Harbor enumeration (the 18 categories
- *    listed in `src/inject-pii-core.ts:28-47`).
- *  - Lucairn sanitizer's internal type vocabulary as observed in the gateway
- *    `extractEntityTypes` logic (`proxy.go:1361-1395`) and the Presidio +
- *    custom recognizer catalogue.
+ * The 11 live prefixes are: PERSON, EMAIL, PHONE, LOCATION, IBAN, CC, SSN,
+ * ID, URL, DOB, SECRET. `ID` and `SECRET` are deliberately UNMAPPED (they
+ * collapse multiple HIPAA categories / are not Safe Harbor categories
+ * respectively; see file-level doc-comment for the full rationale).
  *
- * Categories not currently emitted by the sanitizer (e.g. FACE_PHOTO_REF,
- * BIOMETRIC_ID) are absent from this map; they appear in injected ground
- * truth only and will show as false-negatives if the sanitizer never detects
- * them, which is correct accounting.
+ * If `presidio_scan.py` adds a new placeholder value, the regression test in
+ * `test/redaction-extractor.spec.ts` will fail until this table is updated
+ * or the new prefix is added to that test's `KNOWN_UNMAPPED` set.
  */
 export const LUCAIRN_TO_HIPAA: Readonly<Record<string, HipaaCategory>> = Object.freeze({
-  // Name-bearing types
   PERSON: 'NAME',
-  PERSON_NAME: 'NAME',
-  NAME: 'NAME',
-
-  // Geographic subdivisions
-  LOCATION: 'GEO_SUBDIVISION',
-  ADDRESS: 'GEO_SUBDIVISION',
-  STREET_ADDRESS: 'GEO_SUBDIVISION',
-  ZIP_CODE: 'GEO_SUBDIVISION',
-  GERMAN_ZIP_CODE: 'GEO_SUBDIVISION',
-  CITY: 'GEO_SUBDIVISION',
-
-  // Dates
-  DATE: 'DATE',
-  DATE_TIME: 'DATE',
-
-  // Telephone / fax — sanitizer does not natively distinguish PHONE from FAX.
-  // We map both PHONE_NUMBER and PHONE to PHONE; FAX is only recognised when
-  // a custom recognizer surfaces FAX explicitly.
-  PHONE_NUMBER: 'PHONE',
-  PHONE: 'PHONE',
-  FAX: 'FAX',
-  FAX_NUMBER: 'FAX',
-
-  // Email
   EMAIL: 'EMAIL',
-  EMAIL_ADDRESS: 'EMAIL',
-
-  // US identifier-shaped categories
-  US_SSN: 'SSN',
+  PHONE: 'PHONE',
+  LOCATION: 'GEO_SUBDIVISION',
+  IBAN: 'ACCOUNT_NUMBER', // SEPA bank account numbers
+  CC: 'ACCOUNT_NUMBER', // credit card numbers
   SSN: 'SSN',
-
-  // Medical record / health-plan / account / license / vehicle / device
-  MRN: 'MRN',
-  MEDICAL_RECORD_NUMBER: 'MRN',
-  HEALTH_PLAN_ID: 'HEALTH_PLAN_ID',
-  HEALTH_PLAN_BENEFICIARY_NUMBER: 'HEALTH_PLAN_ID',
-  ACCOUNT_NUMBER: 'ACCOUNT_NUMBER',
-  US_BANK_NUMBER: 'ACCOUNT_NUMBER',
-  IBAN: 'ACCOUNT_NUMBER',
-  IBAN_CODE: 'ACCOUNT_NUMBER',
-  CREDIT_CARD: 'ACCOUNT_NUMBER',
-  CREDIT_CARD_NUMBER: 'ACCOUNT_NUMBER',
-  LICENSE_NUMBER: 'LICENSE_NUMBER',
-  US_DRIVER_LICENSE: 'LICENSE_NUMBER',
-  PROFESSIONAL_LICENSE: 'LICENSE_NUMBER',
-  VEHICLE_ID: 'VEHICLE_ID',
-  VIN: 'VEHICLE_ID',
-  US_VEHICLE_VIN: 'VEHICLE_ID',
-  LICENSE_PLATE: 'VEHICLE_ID',
-  DEVICE_ID: 'DEVICE_ID',
-  DEVICE_SERIAL: 'DEVICE_ID',
-  IMEI: 'DEVICE_ID',
-
-  // Web identifiers
   URL: 'URL',
-  IP_ADDRESS: 'IP_ADDRESS',
-
-  // Biometric / face photo / other unique ID
-  BIOMETRIC_ID: 'BIOMETRIC_ID',
-  FACE_PHOTO_REF: 'FACE_PHOTO_REF',
-  STUDY_ID: 'OTHER_UNIQUE_ID',
-  OTHER_UNIQUE_ID: 'OTHER_UNIQUE_ID',
-  PASSPORT: 'OTHER_UNIQUE_ID',
-  US_PASSPORT: 'OTHER_UNIQUE_ID',
-  US_ITIN: 'OTHER_UNIQUE_ID',
+  DOB: 'DATE',
 });
 
 /**
@@ -137,7 +110,10 @@ export function parsePlaceholderType(placeholder: string): string | null {
 
 /**
  * Map a Lucairn `[TYPE_N]` placeholder to its HIPAA Safe Harbor category.
- * Returns null when the internal type is not in `LUCAIRN_TO_HIPAA`.
+ * Returns null when the internal type is not in `LUCAIRN_TO_HIPAA`. The
+ * documented null cases are `[ID_N]` (collapse-bucket — disambiguation
+ * impossible from the placeholder alone) and `[SECRET_N]` (not a Safe
+ * Harbor category). See the file-level doc-comment for the rationale.
  */
 export function placeholderToHipaaCategory(placeholder: string): HipaaCategory | null {
   const t = parsePlaceholderType(placeholder);
