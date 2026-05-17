@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Declade/lucairn-research/papers/_template/SUMMARY.schema.json",
+  "title": "Lucairn Research Program — per-paper SUMMARY.json",
+  "description": "Aggregate recall / precision / F1 numbers per HIPAA Safe Harbor category + overall + per-row breakdown for any paper in the Lucairn Research Program. Mirrors the RecallSummary shape produced by src/recall.ts.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generator",
+    "overall",
+    "per_category",
+    "per_row",
+    "notes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "generator": {
+      "type": "string",
+      "const": "lucairn-research/recall.ts"
+    },
+    "overall": {
+      "$ref": "#/$defs/OverallCounts"
+    },
+    "per_category": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["category", "counts"],
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "$ref": "#/$defs/HipaaCategory"
+          },
+          "counts": {
+            "$ref": "#/$defs/CategoryCounts"
+          }
+        }
+      },
+      "minItems": 18,
+      "maxItems": 18
+    },
+    "per_row": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["row_index", "tp", "fp", "fn", "recall"],
+        "additionalProperties": false,
+        "properties": {
+          "row_index": { "type": "integer", "minimum": 0 },
+          "tp": { "type": "integer", "minimum": 0 },
+          "fp": { "type": "integer", "minimum": 0 },
+          "fn": { "type": "integer", "minimum": 0 },
+          "recall": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "HipaaCategory": {
+      "type": "string",
+      "enum": [
+        "NAME",
+        "GEO_SUBDIVISION",
+        "DATE",
+        "PHONE",
+        "FAX",
+        "EMAIL",
+        "SSN",
+        "MRN",
+        "HEALTH_PLAN_ID",
+        "ACCOUNT_NUMBER",
+        "LICENSE_NUMBER",
+        "VEHICLE_ID",
+        "DEVICE_ID",
+        "URL",
+        "IP_ADDRESS",
+        "BIOMETRIC_ID",
+        "FACE_PHOTO_REF",
+        "OTHER_UNIQUE_ID"
+      ]
+    },
+    "CategoryCounts": {
+      "type": "object",
+      "required": ["tp", "fp", "fn", "precision", "recall", "f1"],
+      "additionalProperties": false,
+      "properties": {
+        "tp": { "type": "integer", "minimum": 0 },
+        "fp": { "type": "integer", "minimum": 0 },
+        "fn": { "type": "integer", "minimum": 0 },
+        "precision": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "f1": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "OverallCounts": {
+      "type": "object",
+      "required": [
+        "tp",
+        "fp",
+        "fn",
+        "total_annotations",
+        "precision",
+        "recall",
+        "f1"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tp": { "type": "integer", "minimum": 0 },
+        "fp": { "type": "integer", "minimum": 0 },
+        "fn": { "type": "integer", "minimum": 0 },
+        "total_annotations": { "type": "integer", "minimum": 0 },
+        "precision": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "f1": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

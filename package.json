@@ -20,7 +20,10 @@
     "test:watch": "vitest",
     "dataset:download": "node --import tsx scripts/download-mtsamples.ts",
     "dataset:inject-pii": "node --import tsx scripts/inject-pii.ts",
-    "dataset:verify-injection": "node --import tsx scripts/verify-injection.ts"
+    "dataset:verify-injection": "node --import tsx scripts/verify-injection.ts",
+    "pipeline": "node --import tsx scripts/run-pipeline.ts",
+    "collect-certs": "node --import tsx scripts/collect-certs.ts",
+    "compute-recall": "node --import tsx scripts/compute-recall.ts"
   },
   "devDependencies": {
     "@faker-js/faker": "^9.0.0",
