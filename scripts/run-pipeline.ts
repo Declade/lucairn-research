@@ -22,8 +22,8 @@
  *   pnpm run pipeline -- --live --rows=20    # Slice 3 only
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
+import { createWriteStream, existsSync, fsyncSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
@@ -70,6 +70,15 @@ interface CliArgs {
    * flag is absent. Ignored under `--mock`.
    */
   upstreamKey: string | null;
+  /**
+   * Optional client-side rate-limit budget in requests-per-minute. Wired
+   * through to `GatewayClientOptions.rateLimitRpm`. Default null disables
+   * rate-limiting; the 500-row live-run dispatch should set this to the
+   * Anthropic Tier-1 RPM cap (typically 50 for first-tier accounts; the
+   * Slice 3 dispatch defaults to 10 for a conservative belt). Slice 2.5
+   * M2; see `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
+   */
+  rateLimitRpm: number | null;
   missRate: number;
   spuriousFpCount: number;
   activityIdPrefix: string;
@@ -88,6 +97,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     gateway: null,
     apiKey: null,
     upstreamKey: null,
+    rateLimitRpm: null,
     missRate: 0,
     spuriousFpCount: 0,
     activityIdPrefix: 'paper-1-healthcare',
@@ -123,6 +133,12 @@ function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case '--upstream-key':
         args.upstreamKey = val;
+        break;
+      case '--rate-limit-rpm':
+        args.rateLimitRpm = parseIntOrThrow(val, '--rate-limit-rpm');
+        if (args.rateLimitRpm === 0) {
+          throw new Error('--rate-limit-rpm requires a positive integer (use omit-flag to disable)');
+        }
         break;
       case '--miss-rate':
         args.missRate = parseFloatOrThrow(val, '--miss-rate');
@@ -178,6 +194,10 @@ function printHelp(): void {
     '                       Sent as X-Upstream-Key header. Falls back to LUCAIRN_UPSTREAM_KEY env.',
     '                       Required when the Lucairn profile has ByokPerRequest: true; otherwise',
     '                       the gateway returns HTTP 400 missing_upstream_key. Ignored under --mock.',
+    '  --rate-limit-rpm=N   Pace gateway calls at no more than N requests per minute (positive int).',
+    '                       Sets a `60_000/N` ms minimum interval between consecutive row dispatches.',
+    '                       Default unset = no rate-limit. Recommended for Slice 3 live runs to stay',
+    '                       under Anthropic Tier-1 RPM caps. Combines with the 429-retry policy.',
     '  --miss-rate=F        --mock only. Fraction of injected entities the mock misses. Default: 0.',
     '  --spurious-fp-count=N --mock only. Synthetic FP redactions per row. Default: 0.',
     '  --activity-id-prefix=S  per-row activity_id prefix. Default: paper-1-healthcare.',
@@ -345,52 +365,83 @@ async function main(): Promise<void> {
     gatewayUrl,
     apiKey,
     ...(upstreamKey !== null ? { upstreamKey } : {}),
+    ...(cli.rateLimitRpm !== null ? { rateLimitRpm: cli.rateLimitRpm } : {}),
     activityIdPrefix: cli.activityIdPrefix,
   });
 
-  const writer = await import('node:fs/promises');
+  // Streaming NDJSON writer — Slice 2.5 M1; see
+  // `prd-2026-05-17-paper-1-autonomous-finish.md` (Slice 2.5).
+  //
+  // We write one full NDJSON record per row directly to disk (append mode)
+  // and fsync after each write. If the harness is killed mid-run (SIGTERM,
+  // OOM, lost SSH session, etc.), the output file always contains exactly
+  // the records that completed BEFORE the killing event. The previous
+  // buffered-in-memory pattern atomic-wrote at EOF, which meant a 500-row
+  // run that died at row 470 lost ALL 470 successful gateway calls + their
+  // ~$3 of upstream LLM spend.
+  //
+  // Downstream NDJSON readers in `scripts/collect-certs.ts:109` +
+  // `scripts/compute-recall.ts:166` already gracefully skip empty/malformed
+  // lines via `trimmed === ''` guards, so a partial line written
+  // mid-process-death is also safely consumed.
+  const writeStream = createWriteStream(cli.output, { flags: 'w', encoding: 'utf8' });
   let written = 0;
   const startedAt = Date.now();
-  const records: string[] = [];
-  for (const rowIndex of target) {
-    const entities = truthByRow.get(rowIndex) ?? [];
-    const transcription = transcriptByRow.get(rowIndex) ?? '';
-    let result: GatewayRowResult | null = null;
-    let error: { code: string; message: string } | null = null;
-    try {
-      result = await client.runRow({
-        row_index: rowIndex,
-        transcription,
-        entities,
-      });
-    } catch (err) {
-      if (err instanceof GatewayClientError) {
-        error = {
-          code: 'gateway_error',
-          message: `${err.message} (status=${err.status ?? 'null'})`,
-        };
-      } else if (err instanceof Error) {
-        error = { code: 'unknown_error', message: err.message };
-      } else {
-        error = { code: 'unknown_error', message: String(err) };
+  try {
+    for (const rowIndex of target) {
+      const entities = truthByRow.get(rowIndex) ?? [];
+      const transcription = transcriptByRow.get(rowIndex) ?? '';
+      let result: GatewayRowResult | null = null;
+      let error: { code: string; message: string } | null = null;
+      try {
+        result = await client.runRow({
+          row_index: rowIndex,
+          transcription,
+          entities,
+        });
+      } catch (err) {
+        if (err instanceof GatewayClientError) {
+          error = {
+            code: 'gateway_error',
+            message: `${err.message} (status=${err.status ?? 'null'})`,
+          };
+        } else if (err instanceof Error) {
+          error = { code: 'unknown_error', message: err.message };
+        } else {
+          error = { code: 'unknown_error', message: String(err) };
+        }
       }
+      const ndjsonLine = JSON.stringify({
+        row_index: rowIndex,
+        timestamp_utc: new Date().toISOString(),
+        entities_submitted: entities.length,
+        transcription_length: transcription.length,
+        gateway: gatewayUrl,
+        mode: cli.mock ? 'mock' : 'live',
+        mock_miss_rate: cli.mock ? cli.missRate : null,
+        mock_spurious_fp_count: cli.mock ? cli.spuriousFpCount : null,
+        result,
+        error,
+      });
+      // Await the write back-pressure so flushing is deterministic per row.
+      await writeLine(writeStream, `${ndjsonLine}\n`);
+      // fsync(2) every row — durability guarantee for the SIGTERM-mid-run
+      // recovery story. Cost is ~ms per row, negligible vs gateway RTT.
+      const fd = (writeStream as unknown as { fd: number | null }).fd;
+      if (typeof fd === 'number') {
+        try {
+          fsyncSync(fd);
+        } catch {
+          // fsync may fail on some filesystems (tmpfs, certain network
+          // mounts) — swallow; the write itself already succeeded.
+        }
+      }
+      written += 1;
     }
-    const ndjsonLine = JSON.stringify({
-      row_index: rowIndex,
-      timestamp_utc: new Date().toISOString(),
-      entities_submitted: entities.length,
-      transcription_length: transcription.length,
-      gateway: gatewayUrl,
-      mode: cli.mock ? 'mock' : 'live',
-      mock_miss_rate: cli.mock ? cli.missRate : null,
-      mock_spurious_fp_count: cli.mock ? cli.spuriousFpCount : null,
-      result,
-      error,
-    });
-    records.push(ndjsonLine);
-    written += 1;
+  } finally {
+    await new Promise<void>((res) => writeStream.end(res));
+    mock?.close();
   }
-  await writer.writeFile(cli.output, records.join('\n') + '\n', 'utf8');
 
   const elapsedMs = Date.now() - startedAt;
   process.stdout.write(
@@ -398,8 +449,27 @@ async function main(): Promise<void> {
       cli.mock ? 'mock' : 'live'
     })\n`,
   );
+}
 
-  mock?.close();
+/**
+ * Promise-wrap a writeStream.write call so back-pressure is observed
+ * deterministically and the row-to-row event-loop ordering doesn't
+ * silently fall behind during high-throughput live runs.
+ */
+function writeLine(
+  stream: ReturnType<typeof createWriteStream>,
+  chunk: string,
+): Promise<void> {
+  return new Promise((res, rej) => {
+    const ok = stream.write(chunk, (err) => {
+      if (err) rej(err);
+    });
+    if (ok) {
+      res();
+    } else {
+      stream.once('drain', () => res());
+    }
+  });
 }
 
 main().catch((err: unknown) => {
