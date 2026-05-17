@@ -1,6 +1,6 @@
 # @lucairn/research
 
-Empirical methodology code for the Lucairn Research Program — a per-industry series of vendor-published methodology papers measuring **EU AI Act Annex III high-risk obligation evidence completeness** end-to-end on real public datasets.
+Empirical methodology code for the Lucairn Research Program — a per-industry series of vendor-published methodology papers measuring **EU AI Act Cat-1 evidence completeness (Articles 10 and 15 — data governance and accuracy/robustness)** end-to-end on real public datasets. The per-row signed-cert architecture incidentally produces evidence relevant to Articles 12 (record-keeping) and 14 (human oversight), but Cat-1 is the headline claim.
 
 > **About the publisher.** Lucairn is the AI evidence layer for EU regulated companies. This repo is the open methodology code behind the papers at [lucairn.eu/research](https://lucairn.eu/research). Code is MIT-licensed; per-dataset license is documented in the corresponding `datasets/<industry>/RECIPE.md`.
 

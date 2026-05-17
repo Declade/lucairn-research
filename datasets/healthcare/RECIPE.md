@@ -37,6 +37,19 @@ These properties drive the two-measurement methodology below.
 
 Because MTSamples has no published ground-truth PHI annotations, a single measurement against the raw corpus cannot produce a defensible recall number. Paper 1 therefore reports two measurements that answer two different empirical questions.
 
+## Slice-status timeline (current state of the implementation)
+
+This recipe documents the *full* methodology for Paper 1. The implementation lands incrementally:
+
+- **Slice 1 (current commit) — ships:**
+  - Dataset acquisition script (`scripts/download-mtsamples.ts`)
+  - Deterministic synthetic PII re-injection for Measurement B's 500-row subset (`scripts/inject-pii.ts`, `src/inject-pii-core.ts`)
+  - Round-trip verification (`scripts/verify-injection.ts`)
+- **Slice 2 — pending:** harness to call the Lucairn gateway row-by-row, collect cert URLs, compute recall against Measurement B's known ground truth (`scripts/run-pipeline.ts`, `scripts/collect-certs.ts`, `scripts/compute-recall.ts`)
+- **Slice 3 — pending:** full Paper 1 run including **Measurement A's raw-corpus detection pass** (Lucairn over the full ~5k MTSamples corpus, reporting detection counts without ground truth) plus the Measurement B recall numbers + the `papers/paper-1-healthcare/CERTIFICATES.csv` cert-URL appendix
+
+Until Slice 2 + Slice 3 land, the harness + Measurement A code does not exist in this repo. The methodology description below is the published target, not the current shipped state.
+
 ### Measurement A — raw-corpus detection (what does Lucairn flag in the wild?)
 
 - **Input:** the full ~5,000-row raw MTSamples corpus, unchanged.
@@ -65,7 +78,7 @@ The injection density used in Measurement B is calibrated to the i2b2 2014 corpu
 The 18 categories of identifiers that, per HHS 45 CFR § 164.514(b)(2)(i), must be removed for Safe Harbor de-identification. The Lucairn Research Program injects synthetic instances of each of these into Measurement B's subset, ensuring full category coverage.
 
 1. **Names** — patient, family, employer.
-2. **Geographic subdivisions** smaller than a state (street, city, county, precinct, ZIP code) and equivalent geocodes — except the initial three digits of a ZIP code if the geographic unit so formed contains > 20,000 people.
+2. **All geographic subdivisions smaller than a State** (street address, city, county, precinct, ZIP code, and equivalent geocodes), except the initial three digits of the ZIP code where the geographic unit formed by combining all ZIP codes with those three initial digits contains more than 20,000 people per current US Census data; ZIP-code prefixes for areas of 20,000 or fewer people are changed to `000` (45 CFR §164.514(b)(2)(i)(B)).
 3. **Dates** (except year) directly related to an individual — birth date, admission date, discharge date, date of death — and all ages over 89 and all elements of dates indicative of such age.
 4. **Telephone numbers.**
 5. **Fax numbers.**
