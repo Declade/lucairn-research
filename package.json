@@ -21,6 +21,10 @@
     "dataset:download": "node --import tsx scripts/download-mtsamples.ts",
     "dataset:inject-pii": "node --import tsx scripts/inject-pii.ts",
     "dataset:verify-injection": "node --import tsx scripts/verify-injection.ts",
+    "dataset:download:finance": "node --import tsx scripts/download-cfpb.ts",
+    "dataset:inject-finance-pii": "node --import tsx scripts/inject-finance-pii.ts",
+    "dataset:verify-finance-injection": "node --import tsx scripts/verify-finance-injection.ts",
+    "analyze:finance": "node --import tsx scripts/analyze-finance-ndjson.ts",
     "pipeline": "node --import tsx scripts/run-pipeline.ts",
     "collect-certs": "node --import tsx scripts/collect-certs.ts",
     "compute-recall": "node --import tsx scripts/compute-recall.ts"

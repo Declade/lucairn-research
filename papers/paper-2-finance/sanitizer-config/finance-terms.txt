@@ -1,0 +1,219 @@
+# Consumer-finance terms safelist for Paper 2 — the Lucairn Research Program's
+# CFPB Consumer Complaint Database / GLBA NPI benchmark.
+#
+# Loaded by the sanitizer at startup as a lowercase set; consulted in
+# `_drop_tech_term_overlaps`-style logic to suppress PERSON / LOCATION / ID
+# false-positives that fire on consumer-finance prose.
+#
+# Scope: this list is INTENTIONALLY narrow to consumer-finance vocabulary. It
+# does NOT touch SECRET / EMAIL / PHONE / IBAN / CC / DOB / URL spans (those
+# classes do not have the FP problem and a stray term that overlaps a real
+# credential must NEVER be dropped). Match is exact, lowercased, whole-span
+# (the "any word in span" check in `presidio_scan.py:357-364` means one
+# safelisted word makes the entire span safe).
+#
+# Sources of FPs targeted by this list (Paper 2 baseline-run analysis):
+#   - Bank brand names misread as PERSON (Wells Fargo, Chase, JPMorgan…)
+#   - Card-network names misread as PERSON or ORG (Visa, MasterCard…)
+#   - Common consumer-finance terms misread as PERSON or LOCATION (Discover, Capital, …)
+#   - Common finance abbreviations misread as PERSON or ID (FICO, APR, …)
+#
+# Cite-back:
+#   - Sanitizer integration: dual-sandbox-architecture/services/sanitizer/presidio_scan.py:343-365
+#   - Paper 1 equivalent: ../../paper-1-healthcare/sanitizer-config/medical-terms.txt (file on the box)
+#
+# Multi-character only. Short tokens like "IRA" (3 chars but ambiguous with
+# names), "ACH" (could be a name), "APR" (April abbreviation collision) are
+# excluded — they would over-match.
+
+# --- US bank brand names + variants ---
+chase
+jpmorgan
+chase bank
+wells fargo
+bank of america
+bank of the west
+capital one
+citibank
+citigroup
+citi
+discover
+discover bank
+discover financial
+goldman sachs
+charles schwab
+fidelity
+usaa
+navy federal
+navy federal credit union
+pnc bank
+us bank
+truist
+ally bank
+ally financial
+synchrony
+synchrony bank
+synchrony financial
+santander
+hsbc
+barclays
+suntrust
+regions bank
+fifth third
+fifth third bank
+keybank
+huntington
+huntington bank
+m&t bank
+bb&t
+schwab
+e-trade
+e*trade
+robinhood
+sofi
+sofi bank
+credit karma
+credit one
+credit one bank
+quicken loans
+rocket mortgage
+lending club
+prosper
+lendingtree
+
+# --- Card network brand names ---
+visa
+mastercard
+amex
+american express
+discover card
+diners club
+jcb
+
+# --- Common consumer-finance vocabulary ---
+fico
+fico score
+vantagescore
+credit score
+credit report
+credit bureau
+credit limit
+credit history
+credit utilization
+credit inquiry
+hard inquiry
+soft inquiry
+mortgage
+refinance
+refinanced
+escrow
+escrow account
+deposit
+direct deposit
+automatic deposit
+overdraft
+overdraft fee
+debit
+debit card
+credit
+credit card
+checking
+checking account
+savings
+savings account
+brokerage
+brokerage account
+retirement account
+roth ira
+roth
+traditional ira
+401k
+403b
+529 plan
+hsa
+fsa
+beneficiary
+co-borrower
+co-signer
+co-applicant
+underwriting
+underwriter
+appraisal
+foreclosure
+short sale
+deed in lieu
+debt collection
+debt collector
+collection agency
+charge-off
+write-off
+delinquent
+delinquency
+
+# --- Credit bureaus + reporting agencies ---
+equifax
+experian
+transunion
+innovis
+chexsystems
+
+# --- Common consumer-finance regulators (NOT NPI) ---
+cfpb
+consumer financial protection bureau
+fdic
+ftc
+sec
+finra
+ncua
+occ
+fhfa
+hud
+
+# --- Common abbreviations that collide with NER ---
+apr
+apy
+ein
+itin
+arm
+heloc
+mco
+mip
+pmi
+ltv
+dti
+nsf
+nsf fee
+od fee
+od item
+
+# --- Common loan / mortgage program names ---
+fha loan
+va loan
+usda loan
+conventional loan
+jumbo loan
+conforming loan
+fannie mae
+freddie mac
+ginnie mae
+
+# --- Common card / account features (NER trips on these as PERSON sometimes) ---
+cash back
+rewards
+points
+miles
+status
+balance transfer
+statement
+billing cycle
+grace period
+minimum payment
+late payment
+late fee
+annual fee
+foreign transaction fee
+foreign transaction
+exchange rate
+authorized user
+joint account
+beneficiary designation
