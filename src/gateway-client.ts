@@ -41,16 +41,33 @@
  * synthetic URLs / keys.
  */
 
-import type { HipaaCategory, InjectedEntity } from './inject-pii-core.js';
+/**
+ * Minimal shape any paper's injected-entity record must satisfy to be
+ * submitted as ground truth to the gateway. Both
+ *   - `InjectedEntity` (Paper 1 healthcare; `inject-pii-core.ts` —
+ *     `category: HipaaCategory`)
+ *   - `InjectedFinanceEntity` (Paper 2 finance; `inject-finance-pii-core.ts`
+ *     — `category: GlbaCategory`)
+ * are structurally assignable to this interface because HIPAA / GLBA category
+ * string-literal unions are assignable to `string`. Future paper category
+ * enumerations satisfy it the same way without code changes here.
+ */
+export interface AnnotationInput {
+  readonly category: string;
+  readonly value: string;
+  readonly start_char: number;
+  readonly end_char: number;
+}
 
 /**
  * The annotation we send to the gateway as ground truth. `type` carries the
- * HIPAA Safe Harbor category verbatim, so the gateway echoes it back in
- * `matches[].annotation_type` and `missed[].type` and we can aggregate
- * directly without a second mapping pass.
+ * paper's category verbatim (HIPAA Safe Harbor for Paper 1; GLBA NPI for
+ * Paper 2; …), so the gateway echoes it back in `matches[].annotation_type`
+ * and `missed[].type` and we can aggregate directly without a second
+ * mapping pass.
  */
 export interface ProvingGroundAnnotation {
-  readonly type: HipaaCategory;
+  readonly type: string;
   readonly value: string;
   readonly start: number;
   readonly end: number;
@@ -150,7 +167,7 @@ export interface GatewayResponse {
 export interface GatewayRowInput {
   readonly row_index: number;
   readonly transcription: string;
-  readonly entities: readonly InjectedEntity[];
+  readonly entities: readonly AnnotationInput[];
 }
 
 export interface GatewayRowResult {
@@ -274,7 +291,7 @@ const MIN_GROUND_TRUTH_VALUE_LENGTH = 3;
  * MIN_GROUND_TRUTH_VALUE_LENGTH above.
  */
 function buildGroundTruth(
-  entities: readonly InjectedEntity[],
+  entities: readonly AnnotationInput[],
 ): Record<string, ProvingGroundAnnotation[]> {
   const kept: ProvingGroundAnnotation[] = [];
   let droppedCount = 0;

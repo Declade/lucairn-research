@@ -29,12 +29,12 @@ import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
 import {
+  type AnnotationInput,
   GatewayClientError,
   type GatewayRowResult,
   makeGatewayClient,
   readGatewayEnv,
 } from '../src/gateway-client.js';
-import type { InjectedEntity } from '../src/inject-pii-core.js';
 import { parseCsv } from '../src/csv.js';
 import { buildMockResponse, entitiesFromRequestBody } from '../src/mocks/gateway-fixtures.js';
 
@@ -103,6 +103,13 @@ interface CliArgs {
   missRate: number;
   spuriousFpCount: number;
   activityIdPrefix: string;
+  /**
+   * Name of the column in the subset CSV that carries the row's text.
+   * Paper 1 (healthcare): `transcription`. Paper 2 (finance, CFPB CSV):
+   * `Consumer complaint narrative`. Default is `transcription` to preserve
+   * the healthcare path's behavior without explicit override.
+   */
+  narrativeColumn: string;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
@@ -124,6 +131,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     spuriousFpCount: 0,
     activityIdPrefix: 'paper-1-healthcare',
     onlyRow: null,
+    narrativeColumn: 'transcription',
   };
   for (const raw of argv) {
     const eq = raw.indexOf('=');
@@ -178,6 +186,10 @@ function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case '--activity-id-prefix':
         args.activityIdPrefix = val;
+        break;
+      case '--narrative-column':
+        if (val.length === 0) throw new Error('--narrative-column requires a column name');
+        args.narrativeColumn = val;
         break;
       case '--help':
       case '-h':
@@ -250,9 +262,9 @@ function printHelp(): void {
   }
 }
 
-async function loadGroundTruth(path: string): Promise<Map<number, readonly InjectedEntity[]>> {
+async function loadGroundTruth(path: string): Promise<Map<number, readonly AnnotationInput[]>> {
   const text = await readFile(path, 'utf8');
-  const out = new Map<number, InjectedEntity[]>();
+  const out = new Map<number, AnnotationInput[]>();
   let lineNo = 0;
   for (const ln of text.split('\n')) {
     lineNo += 1;
@@ -268,7 +280,7 @@ async function loadGroundTruth(path: string): Promise<Map<number, readonly Injec
     if (typeof parsed.row_index !== 'number' || !Array.isArray(parsed.entities)) {
       throw new Error(`ground truth line ${lineNo} missing row_index or entities`);
     }
-    const entities: InjectedEntity[] = [];
+    const entities: AnnotationInput[] = [];
     for (const item of parsed.entities as unknown[]) {
       if (typeof item !== 'object' || item === null) continue;
       const e = item as {
@@ -284,11 +296,12 @@ async function loadGroundTruth(path: string): Promise<Map<number, readonly Injec
         typeof e.end_char === 'number'
       ) {
         entities.push({
-          // The injected categories are HipaaCategory by construction; we
-          // intentionally avoid a runtime narrowing assertion so a malformed
-          // ground-truth line surfaces in the recall computation rather than
-          // at parse time.
-          category: e.category as InjectedEntity['category'],
+          // Category is loosely typed as `string` at this layer
+          // (`AnnotationInput.category: string`). The category enumeration is
+          // paper-specific (HipaaCategory for Paper 1, GlbaCategory for
+          // Paper 2, …) and the gateway treats annotation_type as opaque.
+          // Malformed ground-truth values surface in the recall computation.
+          category: e.category,
           value: e.value,
           start_char: e.start_char,
           end_char: e.end_char,
@@ -300,7 +313,10 @@ async function loadGroundTruth(path: string): Promise<Map<number, readonly Injec
   return out;
 }
 
-async function loadTranscriptions(path: string): Promise<Map<number, string>> {
+async function loadTranscriptions(
+  path: string,
+  narrativeColumn: string,
+): Promise<Map<number, string>> {
   const text = await readFile(path, 'utf8');
   const { rows } = parseCsv(text);
   const out = new Map<number, string>();
@@ -308,7 +324,7 @@ async function loadTranscriptions(path: string): Promise<Map<number, string>> {
     const idxStr = row['original_row_index'] ?? '';
     const idx = Number.parseInt(idxStr, 10);
     if (!Number.isFinite(idx)) continue;
-    const tr = row['transcription'] ?? '';
+    const tr = row[narrativeColumn] ?? '';
     out.set(idx, tr);
   }
   return out;
@@ -367,7 +383,7 @@ async function main(): Promise<void> {
   }
 
   const truthByRow = await loadGroundTruth(cli.truth);
-  const transcriptByRow = await loadTranscriptions(cli.subset);
+  const transcriptByRow = await loadTranscriptions(cli.subset, cli.narrativeColumn);
   const indices = Array.from(truthByRow.keys()).sort((a, b) => a - b);
   let target: number[];
   if (cli.onlyRow !== null) {

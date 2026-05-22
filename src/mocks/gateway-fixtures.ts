@@ -9,8 +9,8 @@
  * `src/gateway-client.ts` — any divergence is a Slice 3 hazard.
  */
 
-import type { InjectedEntity } from '../inject-pii-core.js';
 import type {
+  AnnotationInput,
   GatewayResponse,
   GroundTruthExtra,
   GroundTruthMatch,
@@ -21,7 +21,7 @@ import { mulberry32 } from '../inject-pii-core.js';
 
 export interface MockBuilderOptions {
   readonly rowIndex: number;
-  readonly entities: readonly InjectedEntity[];
+  readonly entities: readonly AnnotationInput[];
   /** Fraction in [0, 1] of injected entities the mock should "miss". 0 = perfect recall, 1.0 = no detections. */
   readonly missRate?: number;
   /** Optional fixed seed for the per-row PRNG. Default: rowIndex. */
@@ -162,7 +162,7 @@ export function buildMockResponse(options: MockBuilderOptions): GatewayResponse 
  */
 export function entitiesFromRequestBody(body: unknown): {
   rowIndex: number | null;
-  entities: InjectedEntity[];
+  entities: AnnotationInput[];
 } {
   if (typeof body !== 'object' || body === null) {
     return { rowIndex: null, entities: [] };
@@ -185,7 +185,7 @@ export function entitiesFromRequestBody(body: unknown): {
   if (!Array.isArray(transcription)) {
     return { rowIndex, entities: [] };
   }
-  const entities: InjectedEntity[] = [];
+  const entities: AnnotationInput[] = [];
   for (const item of transcription) {
     if (typeof item !== 'object' || item === null) continue;
     const a = item as Partial<ProvingGroundAnnotation>;
