@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lucairn — domain tuning methodology</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg:#0E0F12; --fg:#E8E9EE; --muted:#9CA3AF; --accent:#8EC0F0;
+    --panel:#15171C; --line:#22252C;
+    --green:#10B981; --amber:#F59E0B; --red:#EF4444;
+    --r-sm:6px; --r-md:10px; --r-lg:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:48px 32px;}
+  header{margin-bottom:32px;border-bottom:1px solid var(--line);padding-bottom:24px}
+  .brand{color:var(--accent);font-weight:600;letter-spacing:.02em;font-size:13px;text-transform:uppercase;margin-bottom:8px}
+  h1{font-size:32px;font-weight:600;margin:0 0 8px;letter-spacing:-.01em}
+  h2{font-size:20px;font-weight:600;margin:40px 0 16px;letter-spacing:-.01em}
+  h3{font-size:15px;font-weight:600;margin:0 0 8px;color:var(--fg)}
+  .sub{color:var(--muted);font-size:14px;max-width:780px;margin-top:6px}
+  /* 8-phase flow */
+  .flow{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;margin:0 0 8px}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:14px 12px;position:relative;min-height:118px}
+  .step .num{position:absolute;top:8px;right:10px;color:var(--muted);font-size:11px;font-weight:600}
+  .step .title{font-weight:600;font-size:13px;line-height:1.3;margin-bottom:6px}
+  .step .time{color:var(--accent);font-size:11px;font-weight:600;margin-bottom:6px;letter-spacing:.02em}
+  .step .desc{color:var(--muted);font-size:11px;line-height:1.4}
+  @media (max-width:960px){.flow{grid-template-columns:repeat(4,1fr)}}
+  @media (max-width:600px){.flow{grid-template-columns:repeat(2,1fr)}}
+  /* intervention cards */
+  .interventions{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:18px}
+  .card .tag{font-size:11px;color:var(--accent);font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+  .card h3{margin-bottom:10px}
+  .card ul{margin:8px 0 0;padding-left:18px}
+  .card li{margin:4px 0;color:var(--muted);font-size:13px}
+  .card .impact{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:12px}
+  .card .impact b{color:var(--fg)}
+  @media (max-width:780px){.interventions{grid-template-columns:1fr}}
+  /* arc */
+  .arc{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--r-md);padding:20px 24px;margin-top:16px}
+  .arc q{font-style:italic;color:var(--fg);font-size:15px;line-height:1.65;display:block}
+  .arc q::before,.arc q::after{content:'"'}
+  .arc .note{color:var(--muted);font-size:12px;margin-top:10px}
+  /* vertical table */
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line)}
+  th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+  td{color:var(--fg)}
+  td:first-child{font-weight:600;color:var(--accent)}
+  td .small{color:var(--muted);font-size:12px}
+  /* bundle */
+  .bundle{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:14px}
+  .bundle .b{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:14px;text-align:center}
+  .bundle .b .ico{font-size:18px;color:var(--accent);margin-bottom:6px}
+  .bundle .b .lbl{font-size:13px;font-weight:600}
+  .bundle .b .desc{font-size:11px;color:var(--muted);margin-top:4px}
+  @media (max-width:780px){.bundle{grid-template-columns:repeat(2,1fr)}}
+  footer{margin-top:48px;padding-top:24px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  footer a{color:var(--accent);text-decoration:none}
+  .pill{display:inline-block;background:var(--bg);border:1px solid var(--line);color:var(--muted);padding:3px 9px;border-radius:999px;font-size:11px;margin-right:6px}
+  .row-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0 0}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:16px}
+  .stat .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+  .stat .val{font-size:22px;font-weight:600;color:var(--fg);margin-top:4px}
+  .stat .delta{font-size:11px;color:var(--green);margin-top:2px}
+  @media (max-width:780px){.row-summary{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">Lucairn · Research Program · Methodology</div>
+  <h1>Domain-tuning methodology</h1>
+  <p class="sub">A repeatable 8-phase process that produces empirical before/after PII-redaction benchmarks for any customer vertical. Healthcare (Paper 1) is the first instance; finance, legal, government, HR, education follow the same template. Time budget per vertical: ~2 weeks calendar, ~5 engineering-days, ~15 h pipeline wall-clock.</p>
+  <div class="row-summary">
+    <div class="stat"><div class="lbl">Phases</div><div class="val">8</div><div class="delta">scoping → publication</div></div>
+    <div class="stat"><div class="lbl">Effort / vertical</div><div class="val">~5 days</div><div class="delta">engineering only</div></div>
+    <div class="stat"><div class="lbl">Pipeline wall-clock</div><div class="val">~15 h</div><div class="delta">2× 7 h runs</div></div>
+    <div class="stat"><div class="lbl">Cadence</div><div class="val">1 / 6-8 wks</div><div class="delta">per published paper</div></div>
+  </div>
+</header>
+
+<h2>The 8 phases</h2>
+<div class="flow">
+  <div class="step"><div class="num">0</div><div class="title">Vertical scoping</div><div class="time">1-2 h</div><div class="desc">5/5 go/no-go checks: real customer pain, regulator + taxonomy exists, public corpus exists, framable use case, named publication target.</div></div>
+  <div class="step"><div class="num">1</div><div class="title">Corpus acquisition</div><div class="time">1-3 d</div><div class="desc">Fallback ladder: CC0 → CC-BY → DUA → customer-private → synthetic. Quality bar: ≥500 docs, ≥10 PII / doc.</div></div>
+  <div class="step"><div class="num">2</div><div class="title">Taxonomy mapping</div><div class="time">1 d</div><div class="desc">Convert regulator's category schema into Lucairn annotation_types. Every category cites primary law.</div></div>
+  <div class="step"><div class="num">3</div><div class="title">Ground-truth build</div><div class="time">1 d</div><div class="desc">Synthetic PII injection + 20-30 human-annotated rows for κ ≥ 0.85 sanity check.</div></div>
+  <div class="step"><div class="num">4</div><div class="title">Baseline run</div><div class="time">~7 h</div><div class="desc">"Before" measurement with default sanitizer config. Same harness as every other paper.</div></div>
+  <div class="step"><div class="num">5</div><div class="title">Gap analysis</div><div class="time">0.5 d</div><div class="desc">Top-50 FPs (safelist candidates) + per-category recall (recognizer / L3 prompt candidates).</div></div>
+  <div class="step"><div class="num">6</div><div class="title">Tuning interventions</div><div class="time">0.5-1 d</div><div class="desc">Apply all three intervention types in one deploy.</div></div>
+  <div class="step"><div class="num">7</div><div class="title">After run + publish</div><div class="time">~7 h + 2 d</div><div class="desc">Re-measure with tuned config (no other changes). Ship 5-artifact bundle.</div></div>
+</div>
+
+<h2>Three intervention types (Phase 6)</h2>
+<div class="interventions">
+  <div class="card">
+    <div class="tag">Type 1 · Highest ROI</div>
+    <h3>Domain vocabulary safelist</h3>
+    <ul>
+      <li>Top 50 recurring FP texts from Phase 5</li>
+      <li>Public domain vocabulary list (RxNorm, FASB, statute citations, agency abbreviations, …)</li>
+      <li>Wire as <code>presidio.safe_terms_file</code> — config only, no code change</li>
+    </ul>
+    <div class="impact"><b>Precision impact:</b> +20-40 pp · <b>Effort:</b> 2-3 h</div>
+  </div>
+  <div class="card">
+    <div class="tag">Type 2 · Targeted recall</div>
+    <h3>Custom regex recognizers</h3>
+    <ul>
+      <li>One per weak HIPAA-equivalent category (Phase 5.b)</li>
+      <li>Pattern + relaxed-pattern + context-word list</li>
+      <li>Standard PatternRecognizer template — ~30 min each</li>
+    </ul>
+    <div class="impact"><b>Category recall impact:</b> +30-70 pp · <b>Effort:</b> 3-5 h</div>
+  </div>
+  <div class="card">
+    <div class="tag">Type 3 · Residual closure</div>
+    <h3>L3 LLM prompt enumeration</h3>
+    <ul>
+      <li>Add category-specific examples to Qwen prompt</li>
+      <li>Include regulator citation for grounding</li>
+      <li>Closes the catch-all "other identifier" gaps</li>
+    </ul>
+    <div class="impact"><b>Overall recall impact:</b> +5-10 pp · <b>Effort:</b> ~1 h</div>
+  </div>
+</div>
+
+<h2>The narrative arc (constant across every paper)</h2>
+<div class="arc">
+  <q>Out-of-the-box {generic_tool} on {domain} data hits {RECALL_BEFORE}% recall and {PRECISION_BEFORE}% precision on {N} regulator-tagged entities. Here's why it fails — and what we did to fix it: [SPECIFIC INTERVENTIONS]. After tuning: {RECALL_AFTER}% recall and {PRECISION_AFTER}% precision, in {ENGINEERING_HOURS} hours of engineering. The dual-sandbox isolation invariant held at 100% throughout.</q>
+  <div class="note">Only the nouns change between papers. By Paper 3, "Lucairn benchmark" is a recognizable brand asset.</div>
+</div>
+
+<h2>Vertical → corpus + regulator lookup</h2>
+<table>
+  <thead><tr><th style="width:18%">Vertical</th><th>Corpus candidates</th><th>Regulator + taxonomy</th></tr></thead>
+  <tbody>
+    <tr><td>Healthcare</td><td>MTSamples (CC0), MIMIC-IV (DUA), i2b2 <span class="small">Paper 1 → MTSamples</span></td><td>HIPAA 45 CFR § 164.514(b)(2)(i) — 18 categories</td></tr>
+    <tr><td>Finance</td><td>SEC EDGAR, public banking-statement templates, synthetic transaction logs</td><td>PCI-DSS card data + GLBA + GDPR Art. 4 (EU)</td></tr>
+    <tr><td>Legal</td><td>CourtListener court opinions, public USPTO patent filings</td><td>Attorney-client privilege + state bar + GDPR (EU)</td></tr>
+    <tr><td>Government</td><td>FOIA-released documents, regulatory filings, agency forms</td><td>FedRAMP, FOIA exemption categories, GDPR Art. 4 (EU)</td></tr>
+    <tr><td>HR</td><td>Synthetic CVs, public job postings, exit-interview templates</td><td>GDPR Art. 4, equal-employment regulations, CCPA (CA)</td></tr>
+    <tr><td>Education</td><td>Public university transcripts (where available), course catalogues</td><td>FERPA 34 CFR § 99.3</td></tr>
+  </tbody>
+</table>
+
+<h2>The 5-artifact publication bundle (Phase 8)</h2>
+<div class="bundle">
+  <div class="b"><div class="ico">●</div><div class="lbl">Blog post</div><div class="desc">~2 500 words on lucairn.eu/blog</div></div>
+  <div class="b"><div class="ico">●</div><div class="lbl">Landing page</div><div class="desc">/research/{domain} — the canonical destination</div></div>
+  <div class="b"><div class="ico">●</div><div class="lbl">Paper PDF</div><div class="desc">In the open-source benchmark repo</div></div>
+  <div class="b"><div class="ico">●</div><div class="lbl">LinkedIn series</div><div class="desc">3 posts: before · why · after</div></div>
+  <div class="b"><div class="ico">●</div><div class="lbl">Outbound email</div><div class="desc">Sales template anchored on the numbers</div></div>
+</div>
+
+<h2>What this process explicitly is NOT</h2>
+<table>
+  <tbody>
+    <tr><td>Not</td><td>A sales document. Numbers go where the data takes them. If precision tunes to 70% not 90%, that's the published number. The credibility moat depends on honest reporting.</td></tr>
+    <tr><td>Not</td><td>A vendor-comparison framework. We compare our tuned config vs our untuned config, on the same dataset. Cross-vendor comparisons are a separate paper category.</td></tr>
+    <tr><td>Not</td><td>A regulator-endorsed audit. Always frame as "we measured X" — never "we certify X".</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  <div>
+    <span class="pill">v1.0</span>
+    <span class="pill">2026-05-22</span>
+    <span class="pill">Paper 1: healthcare (baseline shipped)</span>
+  </div>
+  <div>
+    Full methodology: <code>Obsidian/Marcs Money/Projects/lucairn-research/methodology/domain-tuning-process.md</code>
+  </div>
+</footer>
+
+</div>
+</body>
+</html>

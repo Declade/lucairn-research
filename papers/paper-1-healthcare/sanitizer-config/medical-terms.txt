@@ -1,0 +1,313 @@
+# Medical safe terms — prevents false-positive PII detection on clinical content.
+# One term per line. Case-insensitive matching. Lines starting with # are comments.
+#
+# DESIGN PRINCIPLES (after v1 regression — 2026-05-22):
+# 1. Multi-character (>= 5 chars preferred) unambiguous medical brand/eponym/term ONLY.
+# 2. NO short common English words (Head, Soft, Closed, etc.) — the "any word in span"
+#    matcher (presidio_scan.py:366) makes those over-broad and tanks recall on real PII.
+# 3. NO bare abbreviations < 4 chars (IV, MD, GU, etc.) — same reason.
+# 4. NO inflections of common verbs ("Reviewed", "Improved") — same reason.
+#
+# Goal: reduce FPs on eponymous medical brands (Foley, Marcaine, Babinski) without
+# touching real PII detection.
+
+# =============================================================================
+# SECTION A — German psychiatric (DE clinical notes)
+# =============================================================================
+
+# Psychiatric diagnoses (ICD-10 text descriptions)
+Panikstörung
+depressive Episode
+Angststörung
+Schizophrenie
+Zwangsstörung
+Persönlichkeitsstörung
+Anpassungsstörung
+Schlafstörung
+Essstörung
+Suchterkrankung
+
+# Common psychiatric medications (SSRIs, SNRIs, atypical antipsychotics, anxiolytics)
+Sertralin
+Citalopram
+Escitalopram
+Fluoxetin
+Paroxetin
+Mirtazapin
+Venlafaxin
+Duloxetin
+Quetiapin
+Olanzapin
+Risperidon
+Aripiprazol
+Lorazepam
+Diazepam
+Clonazepam
+Pregabalin
+Lithium
+Valproat
+Carbamazepin
+Lamotrigin
+Bupropion
+
+# Common general medications (DE)
+Ibuprofen
+Paracetamol
+Metformin
+Ramipril
+Amlodipin
+Simvastatin
+Omeprazol
+Pantoprazol
+Bisoprolol
+Metoprolol
+Levothyroxin
+
+# Clinical terms (DE)
+Diagnose
+Befund
+Medikation
+Dosierung
+Therapie
+Behandlung
+Anamnese
+Aufnahme
+Entlassung
+Visite
+Konsil
+stationär
+ambulant
+Blutdruck
+Laborwerte
+Blutbild
+
+# =============================================================================
+# SECTION B — English clinical vocabulary v2 (Paper 1 baseline tuning, 2026-05-22)
+# TIGHT: multi-char unambiguous brand names / eponymous terms / procedure terms only.
+# v1 was too broad — included short common words that broke recall. v2 removes those.
+# =============================================================================
+
+# --- Anesthetic drug brand names (eponymous → trigger spaCy PERSON, frequent FP) ---
+Marcaine
+Xylocaine
+Lidocaine
+Bupivacaine
+Propofol
+Diprivan
+Ketamine
+Fentanyl
+Sufentanil
+Demerol
+Meperidine
+Dilaudid
+Hydromorphone
+Decadron
+Dexamethasone
+Versed
+Midazolam
+Toradol
+Ketorolac
+
+# --- Surgical instruments / eponymous medical brands (FP source: named-after-inventor) ---
+Yankauer
+Bovie
+Babcock
+Kocher
+DeBakey
+Metzenbaum
+Halsted
+Frazier
+Penrose
+Hemovac
+Jackson-Pratt
+Vicryl
+Prolene
+Monocryl
+Ethibond
+Ethilon
+Foley
+Gelfoam
+Kerlix
+Xeroform
+Telfa
+Romberg
+Babinski
+Diovan
+Coumadin
+Plavix
+Lipitor
+Synthroid
+Lasix
+Ventolin
+Spiriva
+Singulair
+Symbicort
+Flonase
+Allegra
+Claritin
+Benadryl
+Zantac
+Pepcid
+Prilosec
+Nexium
+Protonix
+Lansoprazole
+Pantoprazole
+Esomeprazole
+Tylenol
+Acetaminophen
+Ibuprofen
+Aspirin
+Lipitor
+Atorvastatin
+Lopressor
+Metoprolol
+Atenolol
+Norvasc
+Amlodipine
+Lisinopril
+Enalapril
+Hydrochlorothiazide
+Furosemide
+Albuterol
+Prednisone
+Cipro
+Ciprofloxacin
+Levofloxacin
+Bactrim
+Augmentin
+Amoxicillin
+Cephalexin
+Zithromax
+Azithromycin
+Doxycycline
+Tetracycline
+Erythromycin
+Vancomycin
+Fluconazole
+
+# --- Procedure / examination terms (multi-char, unambiguous) ---
+Hemostasis
+Anastomosis
+Laparoscopy
+Endoscopy
+Bronchoscopy
+Colonoscopy
+Cystoscopy
+Arthroscopy
+Tracheostomy
+Tracheotomy
+Catheterization
+Cannulation
+Intubation
+Extubation
+Auscultation
+Palpation
+Percussion
+Phlebotomy
+Debridement
+Cauterization
+Electrocautery
+Lithotripsy
+Embolization
+Sclerotherapy
+
+# --- Anatomy: organs/structures (multi-char, unambiguous) ---
+Oropharynx
+Nasopharynx
+Hypopharynx
+Larynx
+Trachea
+Esophagus
+Pharynx
+Tonsils
+Adenoids
+Thyromegaly
+Mediastinum
+Pericardium
+Endocardium
+Myocardium
+Epicardium
+Carotid
+Subclavian
+Brachiocephalic
+Antecubital
+Saphenous
+Gastrocnemius
+Pancreatic
+Urethral
+Prostatic
+Epididymis
+Spermatic
+Fallopian
+Cervix
+Vertebra
+Vertebrae
+Vertebral
+Intervertebral
+Mandibular
+Maxillary
+Zygomatic
+Conjunctiva
+Conjunctival
+Retinal
+Vitreous
+Choroidal
+Lenticular
+Lacrimal
+Cataract
+Glaucoma
+Cutaneous
+Subcutaneous
+Epidermis
+Hypodermis
+Cartilage
+Meniscus
+
+# --- Clinical conditions / diagnoses (multi-char, distinctive) ---
+Hyperlipidemia
+Hypercholesterolemia
+Hypertriglyceridemia
+Hypertension
+Hypotension
+Hypoglycemia
+Hyperglycemia
+Diabetes
+Asthma
+
+# --- HEENT abbreviation (one of the top FP recurrences) ---
+HEENT
+
+# --- Common medical Latin / abbreviations (length >= 4 to avoid over-broad match) ---
+Anasarca
+Stridor
+Stridorous
+Tachypnea
+Bradycardia
+Tachycardia
+Hypotensive
+Hypertensive
+Normotensive
+Afebrile
+Febrile
+Pyrexia
+Diaphoresis
+Diaphoretic
+Ecchymosis
+Hematoma
+Petechiae
+Purpura
+Rhonchi
+Crackles
+Wheezing
+Nontender
+Nondistended
+Noncontributory
+Nonpalpable
+
+# REMOVED in v2 (too broad, caused recall regression):
+# - Short tokens: PR, SQ, SL, IM, IV, MD, GU, GI, CV, ED, ER, OR, NPO, etc.
+# - Common verbs: Reviewed, Discussed, Closed, Stable, Unchanged, Improved, etc.
+# - Common nouns: Head, Mouth, Throat, Tongue, Skin, Bone, Soft (etc.)
+# - Inflections: Sutured, Stapled, Sutured
+# - Numbers/units: mg, ml, cc, units, gm, gr

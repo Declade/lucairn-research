@@ -52,6 +52,16 @@ const MOCK_API_KEY = 'lcr_mock_0000000000000000000000000000';
 
 interface CliArgs {
   rows: number | null;
+  /**
+   * Optional single-row backfill: when set, the pipeline processes ONLY
+   * the row whose `row_index` matches this value, regardless of `rows`.
+   * Used to re-run individual rows that returned 5xx during a 500-row
+   * batch (e.g. a heavy clinical row that hit gunicorn's --timeout 120
+   * worker-kill once and would succeed on retry). Output is a 1-line
+   * NDJSON so the caller can append it to or compare against the
+   * original batch file. Ignored under `--mock`.
+   */
+  onlyRow: number | null;
   mock: boolean;
   live: boolean;
   truth: string;
@@ -81,6 +91,15 @@ interface CliArgs {
    * the locked Lucairn `Developer / Pro / Enterprise` product tier.)
    */
   rateLimitRpm: number | null;
+  /**
+   * Anthropic model identifier for the live pipeline (e.g.
+   * `claude-haiku-4-5-20251001` or `claude-sonnet-4-6`). Wired through to
+   * `GatewayClientOptions.model`. When null, the gateway client defaults to
+   * Haiku 4.5 per the autonomous-finish PRD locked decision. Override only
+   * when reproducing a paper at a non-default model (e.g. Paper N's Version
+   * Tracker section calls for Sonnet to test relink-quality on long names).
+   */
+  model: string | null;
   missRate: number;
   spuriousFpCount: number;
   activityIdPrefix: string;
@@ -100,9 +119,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
     apiKey: null,
     upstreamKey: null,
     rateLimitRpm: null,
+    model: null,
     missRate: 0,
     spuriousFpCount: 0,
     activityIdPrefix: 'paper-1-healthcare',
+    onlyRow: null,
   };
   for (const raw of argv) {
     const eq = raw.indexOf('=');
@@ -111,6 +132,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
     switch (key) {
       case '--rows':
         args.rows = parseIntOrThrow(val, '--rows');
+        break;
+      case '--only-row':
+        args.onlyRow = parseIntOrThrow(val, '--only-row');
         break;
       case '--mock':
         args.mock = true;
@@ -141,6 +165,10 @@ function parseArgs(argv: readonly string[]): CliArgs {
         if (args.rateLimitRpm === 0) {
           throw new Error('--rate-limit-rpm requires a positive integer (use omit-flag to disable)');
         }
+        break;
+      case '--model':
+        if (val.length === 0) throw new Error('--model requires a non-empty model identifier');
+        args.model = val;
         break;
       case '--miss-rate':
         args.missRate = parseFloatOrThrow(val, '--miss-rate');
@@ -196,6 +224,12 @@ function printHelp(): void {
     '                       Sent as X-Upstream-Key header. Falls back to LUCAIRN_UPSTREAM_KEY env.',
     '                       Required when the Lucairn profile has ByokPerRequest: true; otherwise',
     '                       the gateway returns HTTP 400 missing_upstream_key. Ignored under --mock.',
+    '  --model=ID           Anthropic model identifier sent on every gateway call.',
+    '                       Defaults to claude-haiku-4-5-20251001 per the autonomous-finish',
+    '                       PRD locked decision (recall verdict is server-side, so LLM choice',
+    '                       does not affect numbers; Haiku ~5x cheaper than Sonnet for our',
+    '                       token shape). Override only when reproducing a paper run at a',
+    '                       non-default model (Version Tracker section).',
     '  --rate-limit-rpm=N   Pace gateway calls at no more than N requests per minute (positive int).',
     '                       Sets a `60_000/N` ms minimum interval between consecutive row dispatches.',
     '                       Default unset = no rate-limit. Recommended for Slice 3 live runs to stay',
@@ -335,8 +369,18 @@ async function main(): Promise<void> {
   const truthByRow = await loadGroundTruth(cli.truth);
   const transcriptByRow = await loadTranscriptions(cli.subset);
   const indices = Array.from(truthByRow.keys()).sort((a, b) => a - b);
-  const limit = cli.rows ?? indices.length;
-  const target = indices.slice(0, limit);
+  let target: number[];
+  if (cli.onlyRow !== null) {
+    if (!truthByRow.has(cli.onlyRow)) {
+      throw new Error(
+        `--only-row=${cli.onlyRow} not found in ground-truth row_index set`,
+      );
+    }
+    target = [cli.onlyRow];
+  } else {
+    const limit = cli.rows ?? indices.length;
+    target = indices.slice(0, limit);
+  }
 
   let mock: MockServerHandle | null = null;
   let gatewayUrl: string;
@@ -345,6 +389,7 @@ async function main(): Promise<void> {
   // when the customer profile doesn't require BYOK. See the auth-modes
   // table in printHelp() for the four valid combinations.
   let upstreamKey: string | null = null;
+  let requestTimeoutMs: number | null = null;
   if (cli.mock) {
     mock = mountMockServer(cli.missRate, cli.spuriousFpCount);
     gatewayUrl = MOCK_GATEWAY_URL;
@@ -354,6 +399,7 @@ async function main(): Promise<void> {
     gatewayUrl = cli.gateway ?? env.gatewayUrl ?? '';
     apiKey = cli.apiKey ?? env.apiKey ?? '';
     upstreamKey = cli.upstreamKey ?? env.upstreamKey ?? null;
+    requestTimeoutMs = env.requestTimeoutMs;
     if (gatewayUrl === '' || apiKey === '') {
       throw new Error(
         '--live requires LUCAIRN_GATEWAY_URL + LUCAIRN_API_KEY in env or --gateway / --api-key flags',
@@ -368,6 +414,14 @@ async function main(): Promise<void> {
     apiKey,
     ...(upstreamKey !== null ? { upstreamKey } : {}),
     ...(cli.rateLimitRpm !== null ? { rateLimitRpm: cli.rateLimitRpm } : {}),
+    ...(cli.model !== null ? { model: cli.model } : {}),
+    // requestTimeoutMs from LUCAIRN_REQUEST_TIMEOUT_MS env var. Default
+    // SDK timeout is 30 s, but the gateway's L3 LLM PII Shield can take
+    // up to 180 s on heavy clinical prose. Without honoring this env
+    // var, every heavy-L3 row aborts SDK-side at 30 s with "gateway
+    // connection error after 2 retries". The gateway processed the
+    // request fine; the SDK just gave up too early.
+    ...(requestTimeoutMs !== null ? { requestTimeoutMs } : {}),
     activityIdPrefix: cli.activityIdPrefix,
   });
 

@@ -229,7 +229,17 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_BACKOFF_BASE_MS = 500;
 const DEFAULT_BACKOFF_JITTER_MS = 200;
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+/**
+ * Default Anthropic model for the live pipeline. Locked at Haiku 4.5 per
+ * `Opus Advisor/specs/prd-2026-05-17-paper-1-autonomous-finish.md`
+ * Implementation decisions — recall numbers come from server-side
+ * `compareGroundTruth` at `dual-sandbox-architecture/services/gateway/internal/api/ground_truth.go:69-138`,
+ * so LLM choice does not affect the recall verdict. Haiku 4.5 is ~5x cheaper
+ * than Sonnet 4.6 for the ~1K-input / ~200-output token shape this harness
+ * sends; the cost differential is the whole basis for the lock. Override via
+ * `GatewayClientOptions.model` or `--model=<id>` CLI flag.
+ */
+const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_MAX_TOKENS = 64;
 
 function defaultSleep(ms: number): Promise<void> {
