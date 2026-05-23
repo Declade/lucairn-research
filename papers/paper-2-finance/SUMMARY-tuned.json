@@ -1,0 +1,337 @@
+{
+  "input_path": "papers/paper-2-finance/raw-results/tuned-500row-20260522T230735Z.ndjson",
+  "rows_total": 500,
+  "rows_ok": 500,
+  "rows_errored": 0,
+  "aggregate": {
+    "tp_total": 8118,
+    "fn_total": 3125,
+    "fp_total": 1861,
+    "fp_attributed": 1647,
+    "fp_unmapped": 214,
+    "recall": 72.2,
+    "precision": 81.35,
+    "f1": 76.5
+  },
+  "per_category": [
+    {
+      "category": "FULL_NAME",
+      "counts": {
+        "tp": 1867,
+        "fn": 181,
+        "fp_attributed": 386
+      },
+      "recall": 91.16,
+      "precision": 82.87
+    },
+    {
+      "category": "RESIDENTIAL_ADDRESS",
+      "counts": {
+        "tp": 1559,
+        "fn": 141,
+        "fp_attributed": 1214
+      },
+      "recall": 91.71,
+      "precision": 56.22
+    },
+    {
+      "category": "SSN",
+      "counts": {
+        "tp": 773,
+        "fn": 14,
+        "fp_attributed": 5
+      },
+      "recall": 98.22,
+      "precision": 99.36
+    },
+    {
+      "category": "EMAIL",
+      "counts": {
+        "tp": 641,
+        "fn": 15,
+        "fp_attributed": 13
+      },
+      "recall": 97.71,
+      "precision": 98.01
+    },
+    {
+      "category": "PHONE",
+      "counts": {
+        "tp": 657,
+        "fn": 16,
+        "fp_attributed": 19
+      },
+      "recall": 97.62,
+      "precision": 97.19
+    },
+    {
+      "category": "DOB",
+      "counts": {
+        "tp": 285,
+        "fn": 266,
+        "fp_attributed": 3
+      },
+      "recall": 51.72,
+      "precision": 98.96
+    },
+    {
+      "category": "BANK_ACCOUNT_NUMBER",
+      "counts": {
+        "tp": 238,
+        "fn": 1092,
+        "fp_attributed": 0
+      },
+      "recall": 17.89,
+      "precision": 100
+    },
+    {
+      "category": "BANK_ROUTING_NUMBER",
+      "counts": {
+        "tp": 124,
+        "fn": 309,
+        "fp_attributed": 0
+      },
+      "recall": 28.64,
+      "precision": 100
+    },
+    {
+      "category": "CREDIT_CARD_PAN",
+      "counts": {
+        "tp": 1083,
+        "fn": 63,
+        "fp_attributed": 7
+      },
+      "recall": 94.5,
+      "precision": 99.36
+    },
+    {
+      "category": "CARD_CVV",
+      "counts": {
+        "tp": 27,
+        "fn": 84,
+        "fp_attributed": 0
+      },
+      "recall": 24.32,
+      "precision": 100
+    },
+    {
+      "category": "CARD_EXPIRATION",
+      "counts": {
+        "tp": 5,
+        "fn": 159,
+        "fp_attributed": 0
+      },
+      "recall": 3.05,
+      "precision": 100
+    },
+    {
+      "category": "IBAN",
+      "counts": {
+        "tp": 62,
+        "fn": 0,
+        "fp_attributed": 0
+      },
+      "recall": 100,
+      "precision": 100
+    },
+    {
+      "category": "TAX_ID",
+      "counts": {
+        "tp": 178,
+        "fn": 151,
+        "fp_attributed": 0
+      },
+      "recall": 54.1,
+      "precision": 100
+    },
+    {
+      "category": "DRIVER_LICENSE",
+      "counts": {
+        "tp": 226,
+        "fn": 8,
+        "fp_attributed": 0
+      },
+      "recall": 96.58,
+      "precision": 100
+    },
+    {
+      "category": "ACCOUNT_BALANCE",
+      "counts": {
+        "tp": 7,
+        "fn": 413,
+        "fp_attributed": 0
+      },
+      "recall": 1.67,
+      "precision": 100
+    },
+    {
+      "category": "CREDIT_SCORE",
+      "counts": {
+        "tp": 52,
+        "fn": 202,
+        "fp_attributed": 0
+      },
+      "recall": 20.47,
+      "precision": 100
+    },
+    {
+      "category": "LOAN_ACCOUNT_ID",
+      "counts": {
+        "tp": 334,
+        "fn": 11,
+        "fp_attributed": 0
+      },
+      "recall": 96.81,
+      "precision": 100
+    },
+    {
+      "category": "UNMAPPED",
+      "counts": {
+        "tp": 0,
+        "fn": 0,
+        "fp_attributed": 214
+      },
+      "recall": null,
+      "precision": 0
+    }
+  ],
+  "top_extras": [
+    {
+      "value": "XX",
+      "count": 134,
+      "placeholder": "[LOCATION_1]"
+    },
+    {
+      "value": "WY",
+      "count": 23,
+      "placeholder": "[LOCATION_5]"
+    },
+    {
+      "value": "NY",
+      "count": 22,
+      "placeholder": "[LOCATION_2]"
+    },
+    {
+      "value": "KS",
+      "count": 20,
+      "placeholder": "[LOCATION_10]"
+    },
+    {
+      "value": "MD",
+      "count": 20,
+      "placeholder": "[LOCATION_7]"
+    },
+    {
+      "value": "NC",
+      "count": 18,
+      "placeholder": "[LOCATION_2]"
+    },
+    {
+      "value": "U.S.",
+      "count": 17,
+      "placeholder": "[LOCATION_3]"
+    },
+    {
+      "value": "XXXXXXXX",
+      "count": 15,
+      "placeholder": "[PERSON_3]"
+    },
+    {
+      "value": "LA",
+      "count": 15,
+      "placeholder": "[LOCATION_4]"
+    },
+    {
+      "value": "SC",
+      "count": 14,
+      "placeholder": "[LOCATION_4]"
+    },
+    {
+      "value": "MN",
+      "count": 13,
+      "placeholder": "[LOCATION_7]"
+    },
+    {
+      "value": "IA",
+      "count": 13,
+      "placeholder": "[LOCATION_3]"
+    },
+    {
+      "value": "XXXX",
+      "count": 12,
+      "placeholder": "[LOCATION_8]"
+    },
+    {
+      "value": "WV",
+      "count": 10,
+      "placeholder": "[LOCATION_4]"
+    },
+    {
+      "value": "MT",
+      "count": 10,
+      "placeholder": "[LOCATION_2]"
+    },
+    {
+      "value": "US",
+      "count": 8,
+      "placeholder": "[LOCATION_5]"
+    },
+    {
+      "value": "NH",
+      "count": 7,
+      "placeholder": "[LOCATION_16]"
+    },
+    {
+      "value": "XXXXXX",
+      "count": 7,
+      "placeholder": "[PERSON_6]"
+    },
+    {
+      "value": "VT",
+      "count": 7,
+      "placeholder": "[LOCATION_3]"
+    },
+    {
+      "value": "non-compliance",
+      "count": 6,
+      "placeholder": "[ID_4]"
+    },
+    {
+      "value": "MO",
+      "count": 6,
+      "placeholder": "[LOCATION_7]"
+    },
+    {
+      "value": "Cash App",
+      "count": 5,
+      "placeholder": "[PERSON_1]"
+    },
+    {
+      "value": "U.S",
+      "count": 4,
+      "placeholder": "[LOCATION_3]"
+    },
+    {
+      "value": "ny",
+      "count": 4,
+      "placeholder": "[LOCATION_4]"
+    },
+    {
+      "value": "TN",
+      "count": 4,
+      "placeholder": "[LOCATION_12]"
+    }
+  ],
+  "latency": {
+    "count": 500,
+    "mean_ms": 1126,
+    "p50_ms": 1036,
+    "p95_ms": 1732,
+    "max_ms": 4320
+  },
+  "wall_clock": {
+    "first_utc": "2026-05-22T23:07:39.615Z",
+    "last_utc": "2026-05-22T23:28:17.250Z",
+    "duration_ms": 1237635
+  }
+}

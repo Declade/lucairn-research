@@ -1,154 +1,95 @@
 # Consumer-finance terms safelist for Paper 2 — the Lucairn Research Program's
 # CFPB Consumer Complaint Database / GLBA NPI benchmark.
 #
-# Loaded by the sanitizer at startup as a lowercase set; consulted in
-# `_drop_tech_term_overlaps`-style logic to suppress PERSON / LOCATION / ID
-# false-positives that fire on consumer-finance prose.
+# Loaded by the sanitizer at startup as a lowercase set; consulted by the
+# `safe_terms_file` mechanism in `presidio_scan.py:154-365` to suppress
+# PERSON / LOCATION / ID false-positives that fire on consumer-finance prose.
 #
-# Scope: this list is INTENTIONALLY narrow to consumer-finance vocabulary. It
-# does NOT touch SECRET / EMAIL / PHONE / IBAN / CC / DOB / URL spans (those
-# classes do not have the FP problem and a stray term that overlaps a real
-# credential must NEVER be dropped). Match is exact, lowercased, whole-span
-# (the "any word in span" check in `presidio_scan.py:357-364` means one
-# safelisted word makes the entire span safe).
+# Scope discipline (Paper 1's hard-learned lesson — see clinical-pii blog
+# Intervention 1): the safe-terms match is "any word in span", which means a
+# single common-English entry in the safelist makes EVERY span containing it
+# safe. We DO NOT include generic English nouns/verbs like "credit", "balance",
+# "mortgage", "deposit" — they have legitimate non-PII meanings but could
+# also appear inside a real PII span ("John Mortgage" tagged PERSON would be
+# dropped if "mortgage" were safelisted, even if "Mortgage" is a real surname).
 #
-# Sources of FPs targeted by this list (Paper 2 baseline-run analysis):
-#   - Bank brand names misread as PERSON (Wells Fargo, Chase, JPMorgan…)
-#   - Card-network names misread as PERSON or ORG (Visa, MasterCard…)
-#   - Common consumer-finance terms misread as PERSON or LOCATION (Discover, Capital, …)
-#   - Common finance abbreviations misread as PERSON or ID (FICO, APR, …)
+# What we KEEP:
+#   1. Multi-word bank / brand / card-network names (low ambiguity)
+#   2. Distinct finance abbreviations + acronyms with no common-English collisions
+#   3. Credit-bureau names + US-finance regulator names
+#   4. Specific multi-word finance vocabulary (e.g. "fannie mae", "freddie mac")
+#
+# What we DROP (vs the initial draft, after the Paper 1 broadness audit):
+#   - Single-word nouns like credit, debit, deposit, balance, mortgage, escrow
+#   - Common adjectives like delinquent, foreign, annual
+#   - Generic finance verbs (refinance, refinanced)
+#
+# Sources of FPs targeted by this list (predicted from baseline-run analysis):
+#   - US bank brand names misread as PERSON (Wells Fargo, Chase, JPMorgan, …)
+#   - Card-network names misread as PERSON or ORG (Visa, MasterCard, …)
+#   - Loan-program acronyms misread as ID (FHA, VA, USDA loan)
 #
 # Cite-back:
 #   - Sanitizer integration: dual-sandbox-architecture/services/sanitizer/presidio_scan.py:343-365
-#   - Paper 1 equivalent: ../../paper-1-healthcare/sanitizer-config/medical-terms.txt (file on the box)
-#
-# Multi-character only. Short tokens like "IRA" (3 chars but ambiguous with
-# names), "ACH" (could be a name), "APR" (April abbreviation collision) are
-# excluded — they would over-match.
+#   - Paper 1 lesson: lucairn.eu/blog/clinical-pii-redaction-benchmark §Intervention 1
+#   - GLBA Privacy Rule: 16 CFR Part 313 (regulatory backdrop for NPI enumeration)
 
-# --- US bank brand names + variants ---
-chase
-jpmorgan
+# --- US bank brand names (multi-word + unambiguous single-word) ---
 chase bank
+jpmorgan
+jpmorgan chase
 wells fargo
 bank of america
 bank of the west
 capital one
 citibank
 citigroup
-citi
-discover
 discover bank
 discover financial
 goldman sachs
 charles schwab
-fidelity
-usaa
+fidelity investments
 navy federal
 navy federal credit union
 pnc bank
 us bank
-truist
+truist financial
 ally bank
 ally financial
-synchrony
 synchrony bank
 synchrony financial
-santander
-hsbc
-barclays
+santander bank
+santander consumer
+hsbc bank
 suntrust
 regions bank
-fifth third
 fifth third bank
-keybank
-huntington
 huntington bank
 m&t bank
-bb&t
-schwab
-e-trade
-e*trade
-robinhood
-sofi
+robinhood markets
 sofi bank
-credit karma
-credit one
-credit one bank
+lending club
+prosper marketplace
 quicken loans
 rocket mortgage
-lending club
-prosper
 lendingtree
 
 # --- Card network brand names ---
-visa
 mastercard
-amex
 american express
 discover card
-diners club
-jcb
 
-# --- Common consumer-finance vocabulary ---
+# --- Distinct finance abbreviations + acronyms (no common-English collision) ---
 fico
 fico score
 vantagescore
-credit score
-credit report
-credit bureau
-credit limit
-credit history
-credit utilization
-credit inquiry
-hard inquiry
-soft inquiry
-mortgage
-refinance
-refinanced
-escrow
-escrow account
-deposit
-direct deposit
-automatic deposit
-overdraft
-overdraft fee
-debit
-debit card
-credit
-credit card
-checking
-checking account
-savings
-savings account
-brokerage
-brokerage account
-retirement account
-roth ira
-roth
-traditional ira
-401k
-403b
-529 plan
-hsa
-fsa
-beneficiary
-co-borrower
-co-signer
-co-applicant
-underwriting
-underwriter
-appraisal
-foreclosure
-short sale
-deed in lieu
-debt collection
-debt collector
-collection agency
-charge-off
-write-off
-delinquent
-delinquency
+heloc
+fannie mae
+freddie mac
+ginnie mae
+fha loan
+va loan
+usda loan
 
 # --- Credit bureaus + reporting agencies ---
 equifax
@@ -157,63 +98,64 @@ transunion
 innovis
 chexsystems
 
-# --- Common consumer-finance regulators (NOT NPI) ---
+# --- US-finance regulators / agencies (NOT NPI, NOT a person, NOT a place) ---
 cfpb
 consumer financial protection bureau
-fdic
 ftc
-sec
 finra
 ncua
 occ
 fhfa
-hud
 
-# --- Common abbreviations that collide with NER ---
-apr
-apy
-ein
-itin
-arm
-heloc
-mco
-mip
-pmi
-ltv
-dti
-nsf
-nsf fee
-od fee
-od item
-
-# --- Common loan / mortgage program names ---
-fha loan
-va loan
-usda loan
-conventional loan
-jumbo loan
-conforming loan
-fannie mae
-freddie mac
-ginnie mae
-
-# --- Common card / account features (NER trips on these as PERSON sometimes) ---
-cash back
-rewards
-points
-miles
-status
+# --- Specific compound finance phrases that NER mistags ---
+co-borrower
+co-signer
+co-applicant
+authorized user
+joint account
 balance transfer
-statement
-billing cycle
-grace period
-minimum payment
-late payment
+charge-off
+short sale
+deed in lieu
+debt collection
+debt collector
+collection agency
+roth ira
+traditional ira
+529 plan
+529 college
+direct deposit
+automatic deposit
+overdraft fee
 late fee
 annual fee
 foreign transaction fee
 foreign transaction
 exchange rate
-authorized user
-joint account
-beneficiary designation
+prepaid card
+
+# --- Specific cardholder-data terms that appear in PCI-DSS but are not PII themselves ---
+cardholder
+cardholder data
+account data
+service code
+
+# --- CFPB anonymization artifacts (CFPB pre-publishes complaints with X-pattern redactions) ---
+# These appear in the source narrative as residual placeholders; the sanitizer
+# should NOT re-redact them as LOCATION / ID.
+xxxx
+xxxxx
+xxxxxx
+xxxxxxx
+xxxxxxxx
+xxxxxxxxx
+xx/xx/xxxx
+xxxx/xx/xx
+xx-xx-xxxx
+xx/xx
+xxxx xxxx
+xxxx xxxx xxxx xxxx
+suntrust
+united states
+u.s.
+u.s.a.
