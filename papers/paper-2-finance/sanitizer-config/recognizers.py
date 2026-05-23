@@ -29,7 +29,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_aba_routing": PatternRecognizer(
         supported_entity="ID",
         name="paper2_aba_routing",
-        patterns=[Pattern("ABA routing 9-digit", r"\b\d{9}\b", 0.45)],
+        patterns=[Pattern("ABA routing 9-digit", r"\b\d{9}\b", 0.6)],
         context=[
             "routing", "ABA", "wire", "transit", "bank",
             "Routing", "ABA Routing", "ACH",
@@ -44,7 +44,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_bank_account": PatternRecognizer(
         supported_entity="ID",
         name="paper2_bank_account",
-        patterns=[Pattern("Bank account 8-12 digit", r"\b\d{8,12}\b", 0.30)],
+        patterns=[Pattern("Bank account 8-12 digit", r"\b\d{8,12}\b", 0.55)],
         context=[
             "account", "checking", "savings", "ACH", "deposit",
             "Account", "Acct", "acct.", "account #", "Account number",
@@ -58,7 +58,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_card_cvv": PatternRecognizer(
         supported_entity="ID",
         name="paper2_card_cvv",
-        patterns=[Pattern("Card CVV 3-4 digit", r"\b\d{3,4}\b", 0.25)],
+        patterns=[Pattern("Card CVV 3-4 digit", r"\b\d{3,4}\b", 0.55)],
         context=[
             "CVV", "CVC", "CVV2", "CVC2", "security code",
             "Card Verification", "verification value",
@@ -69,7 +69,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_card_expiration": PatternRecognizer(
         supported_entity="ID",
         name="paper2_card_expiration",
-        patterns=[Pattern("Card expiration MM/YY", r"\b(0[1-9]|1[0-2])/\d{2}\b", 0.5)],
+        patterns=[Pattern("Card expiration MM/YY", r"\b(0[1-9]|1[0-2])/\d{2}\b", 0.7)],
         context=[
             "expir", "valid thru", "card",
             "Exp.", "Expiry", "Expires",
@@ -118,7 +118,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_account_balance": PatternRecognizer(
         supported_entity="ID",
         name="paper2_account_balance",
-        patterns=[Pattern("Dollar amount", r"\$[0-9,]+\.\d{2}\b", 0.40)],
+        patterns=[Pattern("Dollar amount", r"\$[0-9,]+\.\d{2}\b", 0.6)],
         context=[
             "balance", "amount", "due", "outstanding",
             "current balance", "statement balance",
@@ -131,7 +131,7 @@ PAPER2_RECOGNIZERS = {
     "paper2_credit_score": PatternRecognizer(
         supported_entity="ID",
         name="paper2_credit_score",
-        patterns=[Pattern("Credit score 300-850", r"\b[3-8]\d{2}\b", 0.30)],
+        patterns=[Pattern("Credit score 300-850", r"\b[3-8]\d{2}\b", 0.55)],
         context=[
             "credit score", "FICO", "score",
             "VantageScore", "credit rating",

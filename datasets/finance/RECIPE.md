@@ -87,7 +87,7 @@ The 17 categories below are the Paper 2 enumeration of "nonpublic personal infor
 
 - **GLBA Privacy Rule, 16 CFR § 313.3(n)** — definition of "nonpublic personal information" + non-exhaustive examples of "personally identifiable financial information."
 - **FTC Safeguards Rule, 16 CFR Part 314** — operational definition of "customer information" that financial institutions must safeguard.
-- **PCI-DSS v4.0 §3.2.1** — Account Data definition (Cardholder Data: PAN + Cardholder Name + Expiration Date + Service Code; Sensitive Authentication Data: CVV/CVC + Full Track + PIN).
+- **PCI-DSS v4.0 Glossary + §3.2.1** — Account Data definition (the v4.0 Glossary defines Account Data, Cardholder Data — PAN + Cardholder Name + Expiration Date + Service Code — and Sensitive Authentication Data — CVV/CVC + Full Track + PIN; §3.2.1 is the storage-retention requirement that references these terms).
 - The enumeration MIRRORS the structural pattern of HIPAA Safe Harbor's 18 identifiers (45 CFR § 164.514(b)(2)(i)) for cross-paper structural parity — but the items themselves are sourced from finance regulators, not health.
 
 **What this enumeration does NOT claim:**
@@ -117,7 +117,7 @@ The 17 categories below are the Paper 2 enumeration of "nonpublic personal infor
 - **EU AI Act:** Regulation (EU) 2024/1689 of the European Parliament and of the Council of 13 June 2024 laying down harmonised rules on artificial intelligence (Artificial Intelligence Act). EUR-Lex: <http://data.europa.eu/eli/reg/2024/1689/oj>.
 - **GLBA Privacy Rule:** 16 CFR Part 313 — Privacy of Consumer Financial Information; specifically 16 CFR § 313.3(n) for the NPI definition. <https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-313>.
 - **FTC Safeguards Rule:** 16 CFR Part 314 — Standards for Safeguarding Customer Information. <https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-314>.
-- **PCI-DSS v4.0:** Payment Card Industry Data Security Standard, Version 4.0; Section 3.2.1 — Account Data definitions. <https://www.pcisecuritystandards.org/document_library>.
+- **PCI-DSS v4.0:** Payment Card Industry Data Security Standard, Version 4.0; Glossary (Account Data, Cardholder Data, Sensitive Authentication Data definitions) + Section 3.2.1 (storage-retention requirement that references those terms). <https://www.pcisecuritystandards.org/document_library>.
 - **HIPAA Safe Harbor enumeration (structural model, NOT regulatory frame):** HHS Office for Civil Rights — *Guidance Regarding Methods for De-identification of Protected Health Information*. <https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html>.
 - **17 U.S.C. § 105 — Subject matter of copyright: United States Government works.** <https://www.copyright.gov/title17/92chap1.html#105>.
 - **CFPB Consumer Complaint Database documentation:** <https://www.consumerfinance.gov/data-research/consumer-complaints/>.
