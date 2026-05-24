@@ -25,6 +25,7 @@
     "dataset:inject-finance-pii": "node --import tsx scripts/inject-finance-pii.ts",
     "dataset:verify-finance-injection": "node --import tsx scripts/verify-finance-injection.ts",
     "analyze:finance": "node --import tsx scripts/analyze-finance-ndjson.ts",
+    "aggregate:paper1": "node --import tsx scripts/aggregate-paper1-summary.ts",
     "pipeline": "node --import tsx scripts/run-pipeline.ts",
     "collect-certs": "node --import tsx scripts/collect-certs.ts",
     "compute-recall": "node --import tsx scripts/compute-recall.ts",

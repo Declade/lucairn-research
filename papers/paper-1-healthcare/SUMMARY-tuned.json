@@ -1,0 +1,157 @@
+{
+  "input_path": "/Users/marcschuelke/lucairn-research/papers/paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson",
+  "rows_total": 500,
+  "rows_with_evaluation": 500,
+  "aggregate": {
+    "tp_total": 8916,
+    "fn_total": 2369,
+    "fp_total": 13898,
+    "recall": 79.01
+  },
+  "per_category": [
+    {
+      "category": "NAME",
+      "counts": {
+        "tp": 2119,
+        "fn": 170
+      },
+      "recall": 92.57
+    },
+    {
+      "category": "GEO_SUBDIVISION",
+      "counts": {
+        "tp": 1356,
+        "fn": 268
+      },
+      "recall": 83.5
+    },
+    {
+      "category": "DATE",
+      "counts": {
+        "tp": 2120,
+        "fn": 1816
+      },
+      "recall": 53.86
+    },
+    {
+      "category": "PHONE",
+      "counts": {
+        "tp": 207,
+        "fn": 6
+      },
+      "recall": 97.18
+    },
+    {
+      "category": "FAX",
+      "counts": {
+        "tp": 219,
+        "fn": 3
+      },
+      "recall": 98.65
+    },
+    {
+      "category": "EMAIL",
+      "counts": {
+        "tp": 244,
+        "fn": 4
+      },
+      "recall": 98.39
+    },
+    {
+      "category": "SSN",
+      "counts": {
+        "tp": 220,
+        "fn": 1
+      },
+      "recall": 99.55
+    },
+    {
+      "category": "MRN",
+      "counts": {
+        "tp": 473,
+        "fn": 21
+      },
+      "recall": 95.75
+    },
+    {
+      "category": "HEALTH_PLAN_ID",
+      "counts": {
+        "tp": 361,
+        "fn": 0
+      },
+      "recall": 100
+    },
+    {
+      "category": "ACCOUNT_NUMBER",
+      "counts": {
+        "tp": 344,
+        "fn": 0
+      },
+      "recall": 100
+    },
+    {
+      "category": "LICENSE_NUMBER",
+      "counts": {
+        "tp": 202,
+        "fn": 2
+      },
+      "recall": 99.02
+    },
+    {
+      "category": "VEHICLE_ID",
+      "counts": {
+        "tp": 169,
+        "fn": 58
+      },
+      "recall": 74.45
+    },
+    {
+      "category": "DEVICE_ID",
+      "counts": {
+        "tp": 240,
+        "fn": 1
+      },
+      "recall": 99.59
+    },
+    {
+      "category": "URL",
+      "counts": {
+        "tp": 159,
+        "fn": 4
+      },
+      "recall": 97.55
+    },
+    {
+      "category": "IP_ADDRESS",
+      "counts": {
+        "tp": 150,
+        "fn": 8
+      },
+      "recall": 94.94
+    },
+    {
+      "category": "BIOMETRIC_ID",
+      "counts": {
+        "tp": 108,
+        "fn": 1
+      },
+      "recall": 99.08
+    },
+    {
+      "category": "FACE_PHOTO_REF",
+      "counts": {
+        "tp": 107,
+        "fn": 4
+      },
+      "recall": 96.4
+    },
+    {
+      "category": "OTHER_UNIQUE_ID",
+      "counts": {
+        "tp": 118,
+        "fn": 2
+      },
+      "recall": 98.33
+    }
+  ]
+}

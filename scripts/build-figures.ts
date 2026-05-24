@@ -9,28 +9,33 @@
  *   docs/figures/methodology-pipeline.svg
  *
  * Data sources (input):
- *   - Paper 1: `papers/paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson`
- *     The harness-emitted per-row NDJSON. Each row carries the gateway's
- *     `evaluation` block (per-category `matches[]` + `missed[]` with HIPAA
- *     `annotation_type` values). We tally TP / FN by `annotation_type` ==
- *     HIPAA Safe Harbor category. No ground-truth.jsonl is needed because
- *     the gateway already performed the value-containment match server-side
- *     (the same arm's-length property documented in `src/recall.ts:13-15`).
- *   - Paper 2: `papers/paper-2-finance/SUMMARY-tuned.json`
- *     Already aggregated by `pnpm run analyze:finance`.
+ *   - Paper 1: papers/paper-1-healthcare/SUMMARY-tuned.json
+ *     Pre-aggregated per-category recall numbers. Produced by
+ *     scripts/aggregate-paper1-summary.ts from the harness NDJSON. The raw
+ *     NDJSON itself is gitignored (per the repo convention "only summaries
+ *     are checked in"); the summary JSON is small and stable, so it lives in
+ *     git and feeds reproducible figure regeneration from a fresh clone.
+ *   - Paper 2: papers/paper-2-finance/SUMMARY-tuned.json
+ *     Already aggregated by pnpm run analyze:finance.
  *
  * Determinism:
  *   Identical inputs produce byte-identical outputs. There are NO timestamps,
  *   PRNGs, locale-dependent number formats, or file-mtime reads in the
- *   rendered SVG. The "Source: …" footnote uses a fixed `SOURCE_LABEL`
+ *   rendered SVG. The "Source: ..." footnote uses a fixed SOURCE_LABEL
  *   constant per figure.
+ *
+ * Failure modes:
+ *   - Input files missing or malformed JSON: throws with a descriptive error
+ *     including the failing path. Published benchmark figures must NEVER be
+ *     generated from a silently-truncated or partial input; the malformed-row
+ *     hard-fail is enforced upstream in aggregate-paper1-summary.ts as well.
  *
  * Re-run:
  *   pnpm run build-figures
  *
- * Adding a new figure: add a `renderFooN()` returning an SVG string, then
- * push a new entry into the `figures` array at the bottom of `main()`. Keep
- * the output ≤50KB per file so git diffs stay readable.
+ * Adding a new figure: add a renderFooN() returning an SVG string, then
+ * push a new entry into the figures array at the bottom of main(). Keep the
+ * output below 50KB per file so git diffs stay readable.
  *
  * No new package dependencies: the SVGs are built from typed template
  * literals.
@@ -43,8 +48,7 @@ import { dirname, resolve } from 'node:path';
 // Inputs
 // --------------------------------------------------------------------------
 
-const PAPER1_NDJSON =
-  'papers/paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson';
+const PAPER1_SUMMARY = 'papers/paper-1-healthcare/SUMMARY-tuned.json';
 const PAPER2_SUMMARY = 'papers/paper-2-finance/SUMMARY-tuned.json';
 
 const OUT_DIR = 'docs/figures';
@@ -53,11 +57,27 @@ const OUT_DIR = 'docs/figures';
  *  Documented in each figure footnote so it is not a magic number. */
 const RECALL_THRESHOLD_PCT = 90;
 
-/** Fixed source label, baked into figures. Used for the "Source: …" footnote. */
-const SOURCE_LABEL_P1 =
-  'Source: paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson';
-const SOURCE_LABEL_P2 = 'Source: paper-2-finance/SUMMARY-tuned.json (tuned run)';
+/** Fixed source labels, baked into figures. The "Source:" prefix is added by
+ *  the renderer (renderHorizontalBarChart) so these constants do not include
+ *  it themselves — that avoids a "Source: Source: ..." double-prefix in the
+ *  cross-paper comparison chart, which prepends its own "Source:". */
+const SOURCE_LABEL_P1 = 'papers/paper-1-healthcare/SUMMARY-tuned.json (tuned run, 500 rows)';
+const SOURCE_LABEL_P2 = 'papers/paper-2-finance/SUMMARY-tuned.json (tuned run, 500 rows)';
 const SOURCE_LABEL_PIPELINE = 'Architecture diagram — Lucairn dual-sandbox pipeline';
+
+/** Long descriptions for each figure. Rendered into the SVG as a <desc>
+ *  element and referenced via aria-describedby on the root <svg> so screen
+ *  readers pick them up. These complement the shorter <title> element. */
+const FIGURE_DESCRIPTIONS = {
+  paper1:
+    'Horizontal bar chart of HIPAA Safe Harbor per-category recall on the Paper 1 healthcare dataset (MTSamples, 500-row tuned-sanitizer run). Each bar shows recall as a percentage with the ground-truth annotation count; bars are colored green at or above 90 percent recall and orange below 90 percent.',
+  paper2:
+    'Horizontal bar chart of GLBA NPI per-category recall on the Paper 2 finance dataset (CFPB Consumer Complaint Database, 500-row tuned-sanitizer run). Each bar shows recall as a percentage with the ground-truth annotation count; bars are colored green at or above 90 percent recall and orange below 90 percent.',
+  comparison:
+    'Grouped horizontal bar chart comparing Paper 1 (HIPAA Safe Harbor, MTSamples, blue) and Paper 2 (GLBA NPI, CFPB, purple) recall on the six PII categories that appear in both enumerations: NAME / FULL_NAME, EMAIL, PHONE, SSN, DATE / DOB, and ADDRESS.',
+  pipeline:
+    'Architecture diagram of the Lucairn sanitization plus adversarial-test pipeline. Customer text flows left-to-right through five boxes: L1 known-entity matching, L2 Presidio NER, L3 PII Shield (Qwen 2.5 7B), L4 reid-guard adversarial scorer (Llama-3.1-8B), and a final witness-emitted signed claim. L1 through L3 are grouped as the sanitization stage; L4 is grouped as the adversarial test stage. A post-detection deny-list / safelist filter is applied across L1 and L2 to suppress false positives but is not itself a layer.',
+} as const;
 
 // --------------------------------------------------------------------------
 // HIPAA + GLBA enumerations (locked taxonomies — see src/*-category-mapping.ts)
@@ -86,16 +106,16 @@ const HIPAA_CATEGORIES = [
 type HipaaCategory = (typeof HIPAA_CATEGORIES)[number];
 
 // --------------------------------------------------------------------------
-// Per-row evaluation aggregation (Paper 1)
+// Shared aggregate shape
 // --------------------------------------------------------------------------
 
 interface PerCategory {
   readonly category: string;
   readonly tp: number;
   readonly fn: number;
-  /** Recall as a percentage 0–100, or null if (tp+fn) == 0 (category absent). */
+  /** Recall as a percentage 0-100, or null if (tp+fn) == 0 (category absent). */
   readonly recallPct: number | null;
-  /** Optional precision percentage 0–100, when the source exposes FP attribution. */
+  /** Optional precision percentage 0-100, when the source exposes FP attribution. */
   readonly precisionPct?: number | null;
 }
 
@@ -109,91 +129,67 @@ interface PaperAggregate {
   };
 }
 
-interface RawEvaluationMatch {
-  annotation_type?: unknown;
+// --------------------------------------------------------------------------
+// Paper 1: SUMMARY-tuned.json (pre-aggregated by aggregate-paper1-summary.ts)
+// --------------------------------------------------------------------------
+
+interface Paper1SummaryEntry {
+  category: string;
+  counts: { tp: number; fn: number };
+  recall: number | null;
 }
-interface RawEvaluationMissed {
-  type?: unknown;
-}
-interface RawEvaluation {
-  true_positives?: unknown;
-  false_negatives?: unknown;
-  false_positives?: unknown;
-  matches?: unknown;
-  missed?: unknown;
-}
-interface RawRow {
-  row_index?: unknown;
-  result?: { evaluation?: RawEvaluation | null } | null;
+interface Paper1Summary {
+  aggregate: { tp_total: number; fn_total: number; fp_total: number; recall: number };
+  per_category: Paper1SummaryEntry[];
 }
 
-async function aggregatePaper1(path: string): Promise<PaperAggregate> {
-  const text = await readFile(path, 'utf8');
-  const tp: Record<HipaaCategory, number> = Object.fromEntries(
-    HIPAA_CATEGORIES.map((c) => [c, 0]),
-  ) as Record<HipaaCategory, number>;
-  const fn: Record<HipaaCategory, number> = Object.fromEntries(
-    HIPAA_CATEGORIES.map((c) => [c, 0]),
-  ) as Record<HipaaCategory, number>;
-  let totalTp = 0;
-  let totalFn = 0;
-  let totalFp = 0;
-
-  let lineNo = 0;
-  for (const ln of text.split('\n')) {
-    lineNo += 1;
-    const trimmed = ln.trim();
-    if (trimmed === '') continue;
-    let parsed: RawRow;
-    try {
-      parsed = JSON.parse(trimmed) as RawRow;
-    } catch (err) {
-      process.stderr.write(
-        `[build-figures] paper-1 line ${lineNo} skipped (not JSON): ${
-          err instanceof Error ? err.message : String(err)
-        }\n`,
-      );
-      continue;
-    }
-    const ev = parsed.result?.evaluation;
-    if (ev === null || ev === undefined) continue;
-    if (Array.isArray(ev.matches)) {
-      for (const m of ev.matches as RawEvaluationMatch[]) {
-        const t = m.annotation_type;
-        if (typeof t === 'string' && HIPAA_CATEGORIES.includes(t as HipaaCategory)) {
-          tp[t as HipaaCategory] += 1;
-        }
-        totalTp += 1;
-      }
-    }
-    if (Array.isArray(ev.missed)) {
-      for (const m of ev.missed as RawEvaluationMissed[]) {
-        const t = m.type;
-        if (typeof t === 'string' && HIPAA_CATEGORIES.includes(t as HipaaCategory)) {
-          fn[t as HipaaCategory] += 1;
-        }
-        totalFn += 1;
-      }
-    }
-    const fpVal = ev.false_positives;
-    if (typeof fpVal === 'number' && Number.isFinite(fpVal)) {
-      totalFp += fpVal;
-    }
+async function loadPaper1(path: string): Promise<PaperAggregate> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `build-figures: failed to read Paper 1 summary '${path}': ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
-
+  let summary: Paper1Summary;
+  try {
+    summary = JSON.parse(text) as Paper1Summary;
+  } catch (err) {
+    throw new Error(
+      `build-figures: malformed JSON in '${path}': ${
+        err instanceof Error ? err.message : String(err)
+      }. Regenerate with: pnpm aggregate:paper1`,
+    );
+  }
+  // Build a map of provided categories so the chart row order matches the
+  // canonical HIPAA enumeration regardless of input order, and any missing
+  // category falls through to a "no data" row.
+  const byCat = new Map<string, Paper1SummaryEntry>(
+    summary.per_category.map((e) => [e.category, e]),
+  );
   const perCategory: PerCategory[] = HIPAA_CATEGORIES.map((cat) => {
-    const t = tp[cat];
-    const f = fn[cat];
-    const n = t + f;
-    const recallPct = n === 0 ? null : (t / n) * 100;
-    return { category: cat, tp: t, fn: f, recallPct };
+    const e = byCat.get(cat);
+    if (e === undefined) {
+      return { category: cat, tp: 0, fn: 0, recallPct: null };
+    }
+    return {
+      category: cat,
+      tp: e.counts.tp,
+      fn: e.counts.fn,
+      recallPct: e.recall,
+    };
   });
-
-  const overallRecallPct = totalTp + totalFn === 0 ? 0 : (totalTp / (totalTp + totalFn)) * 100;
-
   return {
     perCategory,
-    overall: { tp: totalTp, fn: totalFn, fp: totalFp, recallPct: overallRecallPct },
+    overall: {
+      tp: summary.aggregate.tp_total,
+      fn: summary.aggregate.fn_total,
+      fp: summary.aggregate.fp_total,
+      recallPct: summary.aggregate.recall,
+    },
   };
 }
 
@@ -220,8 +216,26 @@ interface Paper2Summary {
 }
 
 async function loadPaper2(path: string): Promise<PaperAggregate> {
-  const text = await readFile(path, 'utf8');
-  const summary = JSON.parse(text) as Paper2Summary;
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `build-figures: failed to read Paper 2 summary '${path}': ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  let summary: Paper2Summary;
+  try {
+    summary = JSON.parse(text) as Paper2Summary;
+  } catch (err) {
+    throw new Error(
+      `build-figures: malformed JSON in '${path}': ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
   const perCategory: PerCategory[] = summary.per_category
     // The UNMAPPED bucket is bookkeeping, not a published GLBA NPI category.
     // Drop it from the bar chart but keep it represented in the overall counts
@@ -250,7 +264,7 @@ async function loadPaper2(path: string): Promise<PaperAggregate> {
 // --------------------------------------------------------------------------
 
 /** Color palette — neutral grays + 2 accent colors, dark-mode-friendly via
- *  a tiny embedded `<style>` block using `prefers-color-scheme`. */
+ *  a tiny embedded <style> block using prefers-color-scheme. */
 const COLOR = {
   bg: '#ffffff',
   bgDark: '#0d1117',
@@ -260,27 +274,35 @@ const COLOR = {
   textDark: '#e6edf3',
   grid: '#d0d7de',
   gridDark: '#30363d',
-  green: '#2da44e', // recall ≥ threshold
+  green: '#2da44e', // recall >= threshold
   orange: '#bf8700', // recall < threshold
   blue: '#0969da', // Paper 1 in comparison chart
   purple: '#8250df', // Paper 2 in comparison chart
 } as const;
 
-function svgHeader(width: number, height: number, title: string): string {
+function svgHeader(width: number, height: number, title: string, description: string): string {
+  // Use stable, figure-local element ids so multiple SVGs can be embedded on
+  // one page without an id collision. The ids are namespaced by the figure
+  // width+height because all four figures have distinct dimensions.
+  const titleId = `title-${width}x${height}`;
+  const descId = `desc-${width}x${height}`;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" ` +
-    `role="img" aria-labelledby="title">` +
-    `<title id="title">${escapeXml(title)}</title>` +
+    `role="img" aria-labelledby="${titleId}" aria-describedby="${descId}">` +
+    `<title id="${titleId}">${escapeXml(title)}</title>` +
+    `<desc id="${descId}">${escapeXml(description)}</desc>` +
     `<style>` +
     `.bg{fill:${COLOR.bg}}` +
     `.axis{stroke:${COLOR.axis};fill:${COLOR.axis}}` +
     `.text{fill:${COLOR.text};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}` +
     `.grid{stroke:${COLOR.grid}}` +
+    `.groupBracket{stroke:${COLOR.grid};fill:none}` +
     `@media (prefers-color-scheme: dark){` +
     `.bg{fill:${COLOR.bgDark}}` +
     `.axis{stroke:${COLOR.axisDark};fill:${COLOR.axisDark}}` +
     `.text{fill:${COLOR.textDark}}` +
     `.grid{stroke:${COLOR.gridDark}}` +
+    `.groupBracket{stroke:${COLOR.gridDark}}` +
     `}` +
     `</style>` +
     `<rect class="bg" width="${width}" height="${height}"/>`
@@ -300,7 +322,7 @@ function escapeXml(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** 2-decimal fixed format (no locale dependency). */
+/** 1-decimal fixed format (no locale dependency). */
 function fmtPct(v: number): string {
   return `${v.toFixed(1)}%`;
 }
@@ -312,8 +334,10 @@ function fmtPct(v: number): string {
 interface BarChartOpts {
   title: string;
   subtitle: string;
+  description: string;
   rows: readonly PerCategory[];
-  /** Source label rendered at the bottom of the figure. */
+  /** Source label rendered at the bottom of the figure (without the "Source:"
+   *  prefix — the renderer adds it). */
   source: string;
   /** Note rendered below the source label, e.g. legend interpretation. */
   note: string;
@@ -329,7 +353,7 @@ function renderHorizontalBarChart(opts: BarChartOpts): string {
   const BAR_AREA = WIDTH - LEFT_LABELS - RIGHT_PAD;
   const HEIGHT = TOP + opts.rows.length * ROW_H + BOTTOM;
 
-  const parts: string[] = [svgHeader(WIDTH, HEIGHT, opts.title)];
+  const parts: string[] = [svgHeader(WIDTH, HEIGHT, opts.title, opts.description)];
 
   // Title + subtitle
   parts.push(
@@ -399,7 +423,7 @@ function renderHorizontalBarChart(opts: BarChartOpts): string {
 
   // Footnote
   parts.push(
-    `<text class="text" x="20" y="${HEIGHT - 18}" font-size="10" opacity="0.75">${escapeXml(opts.source)}</text>`,
+    `<text class="text" x="20" y="${HEIGHT - 18}" font-size="10" opacity="0.75">Source: ${escapeXml(opts.source)}</text>`,
     `<text class="text" x="20" y="${HEIGHT - 6}" font-size="10" opacity="0.75">${escapeXml(opts.note)}</text>`,
   );
 
@@ -439,7 +463,14 @@ function renderComparisonChart(p1: PaperAggregate, p2: PaperAggregate): string {
   const HEIGHT = TOP + SHARED_CATEGORIES.length * GROUP_H + BOTTOM;
   const xAt = (pct: number): number => LEFT_LABELS + (pct / 100) * BAR_AREA;
 
-  const parts: string[] = [svgHeader(WIDTH, HEIGHT, 'Paper 1 vs Paper 2 — shared categories')];
+  const parts: string[] = [
+    svgHeader(
+      WIDTH,
+      HEIGHT,
+      'Paper 1 vs Paper 2 — shared categories',
+      FIGURE_DESCRIPTIONS.comparison,
+    ),
+  ];
   parts.push(
     `<text class="text" x="20" y="30" font-size="18" font-weight="600">Paper 1 vs Paper 2 — shared categories</text>`,
     `<text class="text" x="20" y="52" font-size="12">Recall on categories present in both HIPAA Safe Harbor and the GLBA NPI enumeration.</text>`,
@@ -506,7 +537,7 @@ function renderComparisonChart(p1: PaperAggregate, p2: PaperAggregate): string {
 }
 
 // --------------------------------------------------------------------------
-// Pipeline diagram: L1 → L2 → L3 → L4 + signed claim emission
+// Pipeline diagram: L1 -> L2 -> L3 -> L4 + signed claim emission
 // --------------------------------------------------------------------------
 
 function renderPipelineDiagram(): string {
@@ -516,32 +547,43 @@ function renderPipelineDiagram(): string {
   const BOX_H = 70;
   const Y = 110;
   const GAP = 25;
-  // Boxes laid out horizontally; arrows between them.
+  // Layer labels match the canonical sanitizer architecture in
+  // dual-sandbox-architecture (services/sanitizer/known_entity.py:155 for L1,
+  // services/sanitizer/presidio_scan.py:147 for L2, the LLM-sanitizer design
+  // spec for L3, the L4 reid-guard PRD for L4). The deny-list / safelist is a
+  // post-detection FP filter applied across L1+L2 — NOT a layer of its own.
   const boxes: Array<{ x: number; title: string; sub: string; stage: 'sanitize' | 'adversarial' | 'output' }> = [
-    { x: 20, title: 'L1', sub: 'Regex', stage: 'sanitize' },
-    { x: 20 + (BOX_W + GAP) * 1, title: 'L2', sub: 'Deny-list', stage: 'sanitize' },
+    { x: 20, title: 'L1', sub: 'Known-entity match', stage: 'sanitize' },
+    { x: 20 + (BOX_W + GAP) * 1, title: 'L2', sub: 'Presidio NER', stage: 'sanitize' },
     { x: 20 + (BOX_W + GAP) * 2, title: 'L3', sub: 'PII Shield (Qwen)', stage: 'sanitize' },
     { x: 20 + (BOX_W + GAP) * 3, title: 'L4', sub: 'reid-guard', stage: 'adversarial' },
     { x: 20 + (BOX_W + GAP) * 4, title: 'Signed claim', sub: 'witness-emitted', stage: 'output' },
   ];
 
-  const parts: string[] = [svgHeader(WIDTH, HEIGHT, 'Lucairn sanitization + adversarial-test pipeline')];
+  const parts: string[] = [
+    svgHeader(
+      WIDTH,
+      HEIGHT,
+      'Lucairn sanitization + adversarial-test pipeline',
+      FIGURE_DESCRIPTIONS.pipeline,
+    ),
+  ];
 
   parts.push(
     `<text class="text" x="20" y="30" font-size="18" font-weight="600">Lucairn sanitization + adversarial-test pipeline</text>`,
     `<text class="text" x="20" y="52" font-size="12">Customer text flows L1 → L4. L1-L3 sanitize; L4 is an adversarial re-identification scorer.</text>`,
   );
 
-  // Group brackets
+  // Group brackets — class="groupBracket" so the stroke swaps in dark mode.
   const sanitizeStart = boxes[0]?.x ?? 0;
   const sanitizeEnd = (boxes[2]?.x ?? 0) + BOX_W;
   parts.push(
-    `<rect x="${sanitizeStart - 6}" y="${Y - 26}" width="${sanitizeEnd - sanitizeStart + 12}" height="${BOX_H + 36}" fill="none" stroke="${COLOR.grid}" stroke-dasharray="3,2" rx="6"/>`,
+    `<rect class="groupBracket" x="${sanitizeStart - 6}" y="${Y - 26}" width="${sanitizeEnd - sanitizeStart + 12}" height="${BOX_H + 36}" stroke-dasharray="3,2" rx="6"/>`,
     `<text class="text" x="${(sanitizeStart + sanitizeEnd) / 2}" y="${Y - 12}" font-size="11" text-anchor="middle" opacity="0.7">sanitization layers</text>`,
   );
   const advX = boxes[3]?.x ?? 0;
   parts.push(
-    `<rect x="${advX - 6}" y="${Y - 26}" width="${BOX_W + 12}" height="${BOX_H + 36}" fill="none" stroke="${COLOR.grid}" stroke-dasharray="3,2" rx="6"/>`,
+    `<rect class="groupBracket" x="${advX - 6}" y="${Y - 26}" width="${BOX_W + 12}" height="${BOX_H + 36}" stroke-dasharray="3,2" rx="6"/>`,
     `<text class="text" x="${advX + BOX_W / 2}" y="${Y - 12}" font-size="11" text-anchor="middle" opacity="0.7">adversarial test</text>`,
   );
 
@@ -578,7 +620,7 @@ function renderPipelineDiagram(): string {
 
   parts.push(
     `<text class="text" x="20" y="${HEIGHT - 18}" font-size="10" opacity="0.75">${escapeXml(SOURCE_LABEL_PIPELINE)}</text>`,
-    `<text class="text" x="20" y="${HEIGHT - 6}" font-size="10" opacity="0.75">L1-L3 redact PII before any LLM call; L4 runs an attacker-LLM (Llama-3.1-8B) over the sanitized output + an aux corpus to score residual re-identification risk.</text>`,
+    `<text class="text" x="20" y="${HEIGHT - 6}" font-size="10" opacity="0.75">Deny-list / safelist is a post-detection FP filter applied across L1+L2, not a layer. L4 runs an attacker LLM (Llama-3.1-8B) over post-L3 sanitized text + an aux corpus to score residual re-identification risk.</text>`,
   );
 
   parts.push(svgFooter());
@@ -596,13 +638,13 @@ async function main(): Promise<void> {
 
   process.stdout.write(`[build-figures] root=${root}\n`);
 
-  const p1 = await aggregatePaper1(resolve(root, PAPER1_NDJSON));
+  const p1 = await loadPaper1(resolve(root, PAPER1_SUMMARY));
   process.stdout.write(
-    `[build-figures] paper-1 aggregated: overall tp=${p1.overall.tp} fn=${p1.overall.fn} fp=${p1.overall.fp} recall=${p1.overall.recallPct.toFixed(2)}%\n`,
+    `[build-figures] paper-1 loaded: overall tp=${p1.overall.tp} fn=${p1.overall.fn} fp=${p1.overall.fp} recall=${p1.overall.recallPct.toFixed(2)}%\n`,
   );
   const p2 = await loadPaper2(resolve(root, PAPER2_SUMMARY));
   process.stdout.write(
-    `[build-figures] paper-2 loaded:     overall tp=${p2.overall.tp} fn=${p2.overall.fn} fp=${p2.overall.fp} recall=${p2.overall.recallPct.toFixed(2)}%\n`,
+    `[build-figures] paper-2 loaded: overall tp=${p2.overall.tp} fn=${p2.overall.fn} fp=${p2.overall.fp} recall=${p2.overall.recallPct.toFixed(2)}%\n`,
   );
 
   const figures: Array<{ path: string; content: string }> = [
@@ -611,6 +653,7 @@ async function main(): Promise<void> {
       content: renderHorizontalBarChart({
         title: 'Paper 1 — HIPAA Safe Harbor per-category recall',
         subtitle: 'MTSamples (CC0) + synthetic PII injection at i2b2 density, 500-row Measurement B subset, tuned sanitizer.',
+        description: FIGURE_DESCRIPTIONS.paper1,
         rows: p1.perCategory,
         source: SOURCE_LABEL_P1,
         note: `Green: recall ≥ ${RECALL_THRESHOLD_PCT}%. Orange: recall < ${RECALL_THRESHOLD_PCT}%. n = ground-truth annotations in this category.`,
@@ -621,6 +664,7 @@ async function main(): Promise<void> {
       content: renderHorizontalBarChart({
         title: 'Paper 2 — GLBA NPI per-category recall',
         subtitle: 'CFPB Consumer Complaint Database (US public domain) + synthetic NPI injection, 500-row Measurement B subset, tuned sanitizer.',
+        description: FIGURE_DESCRIPTIONS.paper2,
         rows: p2.perCategory,
         source: SOURCE_LABEL_P2,
         note: `Green: recall ≥ ${RECALL_THRESHOLD_PCT}%. Orange: recall < ${RECALL_THRESHOLD_PCT}%. n = ground-truth annotations in this category.`,
