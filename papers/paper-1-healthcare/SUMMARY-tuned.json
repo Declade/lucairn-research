@@ -1,5 +1,5 @@
 {
-  "input_path": "/Users/marcschuelke/lucairn-research/papers/paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson",
+  "input_path": "papers/paper-1-healthcare/raw-results/paper1-AFTER-500row-20260522T080037Z.ndjson",
   "rows_total": 500,
   "rows_with_evaluation": 500,
   "aggregate": {

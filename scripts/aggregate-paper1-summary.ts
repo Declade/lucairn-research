@@ -111,13 +111,22 @@ function parseArgs(argv: readonly string[]): { input: string; output: string } {
   return { input, output };
 }
 
-async function aggregate(inputPath: string): Promise<Paper1Summary> {
+/**
+ * @param inputAbs   Absolute path used for filesystem reads + error messages.
+ * @param inputLabel Repo-relative path (or other stable label) embedded into
+ *                   the summary's `input_path` field. We deliberately do NOT
+ *                   store the absolute path — committed summaries must not
+ *                   leak per-user filesystem paths (e.g. `/Users/<name>/...`),
+ *                   which the personal-info-leak-detector flags as HIGH. This
+ *                   matches the convention used by Paper 2's SUMMARY-tuned.json.
+ */
+async function aggregate(inputAbs: string, inputLabel: string): Promise<Paper1Summary> {
   let text: string;
   try {
-    text = await readFile(inputPath, 'utf8');
+    text = await readFile(inputAbs, 'utf8');
   } catch (err) {
     throw new Error(
-      `aggregate-paper1-summary: failed to read input '${inputPath}': ${
+      `aggregate-paper1-summary: failed to read input '${inputAbs}': ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -149,7 +158,7 @@ async function aggregate(inputPath: string): Promise<Paper1Summary> {
     } catch (err) {
       // Fail loud: published benchmark figures must not silently drop rows.
       throw new Error(
-        `aggregate-paper1-summary: malformed JSON at ${inputPath}:${lineNo}: ${
+        `aggregate-paper1-summary: malformed JSON at ${inputAbs}:${lineNo}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -193,7 +202,7 @@ async function aggregate(inputPath: string): Promise<Paper1Summary> {
     totalTp + totalFn === 0 ? 0 : Number(((totalTp / (totalTp + totalFn)) * 100).toFixed(2));
 
   return {
-    input_path: inputPath,
+    input_path: inputLabel,
     rows_total: rowsTotal,
     rows_with_evaluation: rowsWithEval,
     aggregate: {
@@ -214,7 +223,10 @@ async function main(): Promise<void> {
   const outputAbs = resolve(root, output);
 
   process.stdout.write(`[aggregate-paper1] input=${input}\n`);
-  const summary = await aggregate(inputAbs);
+  // Pass the user-supplied (repo-relative-by-convention) `input` as the label
+  // embedded into the summary, so the committed JSON contains a stable
+  // repo-relative path rather than a per-user absolute path.
+  const summary = await aggregate(inputAbs, input);
   process.stdout.write(
     `[aggregate-paper1] aggregated: rows=${summary.rows_total} with_eval=${summary.rows_with_evaluation} tp=${summary.aggregate.tp_total} fn=${summary.aggregate.fn_total} fp=${summary.aggregate.fp_total} recall=${summary.aggregate.recall}%\n`,
   );
