@@ -27,7 +27,8 @@
     "analyze:finance": "node --import tsx scripts/analyze-finance-ndjson.ts",
     "pipeline": "node --import tsx scripts/run-pipeline.ts",
     "collect-certs": "node --import tsx scripts/collect-certs.ts",
-    "compute-recall": "node --import tsx scripts/compute-recall.ts"
+    "compute-recall": "node --import tsx scripts/compute-recall.ts",
+    "build-figures": "node --import tsx scripts/build-figures.ts"
   },
   "devDependencies": {
     "@faker-js/faker": "^9.0.0",
