@@ -344,11 +344,19 @@ interface BarChartOpts {
 }
 
 function renderHorizontalBarChart(opts: BarChartOpts): string {
-  const WIDTH = 760;
+  // WIDTH bumped 760 -> 880 (Codex r2): the right-side per-row label
+  //   "<recall%>% (n=NNNN)" is appended at x = LEFT_LABELS + barWidth + 6.
+  //   At 100% recall + a 4-digit n, that string is ~95px wide; with the
+  //   previous WIDTH=760 + RIGHT_PAD=70 the label overran the viewBox by
+  //   ~25-40px and was clipped on the right edge in Paper 1, Paper 2, and
+  //   the comparison chart. The 880px viewBox gives the longest label
+  //   (~"100.0% (n=8916)") comfortable headroom inside RIGHT_PAD without
+  //   shrinking BAR_AREA or changing column proportions.
+  const WIDTH = 880;
   const ROW_H = 26;
   const TOP = 70; // space for title + subtitle
   const LEFT_LABELS = 200;
-  const RIGHT_PAD = 70; // for the recall % text + headroom
+  const RIGHT_PAD = 130; // for the recall % text (~95px at 100% + 4-digit n) + headroom
   const BOTTOM = 70; // for x-axis labels + source line + note line
   const BAR_AREA = WIDTH - LEFT_LABELS - RIGHT_PAD;
   const HEIGHT = TOP + opts.rows.length * ROW_H + BOTTOM;
@@ -453,11 +461,17 @@ const SHARED_CATEGORIES: ReadonlyArray<{
 ];
 
 function renderComparisonChart(p1: PaperAggregate, p2: PaperAggregate): string {
-  const WIDTH = 760;
+  // WIDTH bumped 760 -> 880 (Codex r2): "Paper 1: 100.0%" / "Paper 2: 100.0%"
+  //   right-side labels overran the viewBox at 100% recall under the previous
+  //   760+RIGHT_PAD=60 budget. Also the source footer concatenates two long
+  //   SOURCE_LABEL_* strings on one line and was clipping on the right edge.
+  //   880 + RIGHT_PAD=120 keeps the right-side labels inside the viewBox at
+  //   every recall value AND fits the concatenated source-line footer.
+  const WIDTH = 880;
   const TOP = 70;
   const GROUP_H = 60; // 2 bars per group + gap
   const LEFT_LABELS = 160;
-  const RIGHT_PAD = 60;
+  const RIGHT_PAD = 120;
   const BOTTOM = 70;
   const BAR_AREA = WIDTH - LEFT_LABELS - RIGHT_PAD;
   const HEIGHT = TOP + SHARED_CATEGORIES.length * GROUP_H + BOTTOM;
@@ -541,8 +555,17 @@ function renderComparisonChart(p1: PaperAggregate, p2: PaperAggregate): string {
 // --------------------------------------------------------------------------
 
 function renderPipelineDiagram(): string {
-  const WIDTH = 760;
-  const HEIGHT = 320;
+  // WIDTH bumped 760 -> 800 (Codex r2): the rightmost box ("Signed claim",
+  //   index 4) sits at x = 20 + (BOX_W + GAP) * 4 = 640 with BOX_W=130, so
+  //   it ends at x=770 — 10px past the previous 760px viewBox. The "out:
+  //   signed claim → customer" footer text was anchored at x = box5.x + BOX_W
+  //   = 770 with text-anchor="end", clipping the same way. 800px gives the
+  //   final box a clean 30px right margin while keeping the diagram compact.
+  const WIDTH = 800;
+  // HEIGHT bumped 320 -> 340 (Codex r2): the footer note text (~270 chars at
+  //   font-size 10) overflowed the 800px viewBox on a single line; splitting
+  //   it onto two stacked lines adds ~12px of vertical space.
+  const HEIGHT = 340;
   const BOX_W = 130;
   const BOX_H = 70;
   const Y = 110;
@@ -618,9 +641,12 @@ function renderPipelineDiagram(): string {
     );
   }
 
+  // Footer is THREE stacked lines (source label + 2 wrapped note lines) to
+  // avoid the previous single-line note that overran the viewBox on the right.
   parts.push(
-    `<text class="text" x="20" y="${HEIGHT - 18}" font-size="10" opacity="0.75">${escapeXml(SOURCE_LABEL_PIPELINE)}</text>`,
-    `<text class="text" x="20" y="${HEIGHT - 6}" font-size="10" opacity="0.75">Deny-list / safelist is a post-detection FP filter applied across L1+L2, not a layer. L4 runs an attacker LLM (Llama-3.1-8B) over post-L3 sanitized text + an aux corpus to score residual re-identification risk.</text>`,
+    `<text class="text" x="20" y="${HEIGHT - 30}" font-size="10" opacity="0.75">${escapeXml(SOURCE_LABEL_PIPELINE)}</text>`,
+    `<text class="text" x="20" y="${HEIGHT - 18}" font-size="10" opacity="0.75">Deny-list / safelist is a post-detection FP filter applied across L1+L2, not a layer.</text>`,
+    `<text class="text" x="20" y="${HEIGHT - 6}" font-size="10" opacity="0.75">L4 runs an attacker LLM (Llama-3.1-8B) over post-L3 sanitized text + an aux corpus to score residual re-identification risk.</text>`,
   );
 
   parts.push(svgFooter());
