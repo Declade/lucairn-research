@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 title: "Lucairn Research Program — empirical methodology code"
-message: "If you reference this methodology code or the papers it produced, please cite both this repository AND the specific paper landing page on lucairn.eu/research/<slug>."
+message: "If you reference this methodology code or the papers it produced, please cite both this repository AND the specific paper landing page on lucairn.eu/en/research/<slug>."
 type: software
 authors:
   - family-names: "Schülke"
@@ -8,17 +8,16 @@ authors:
     email: "marc@lucairn.eu"
     affiliation: "Lucairn UG (i.Gr.)"
 repository-code: "https://github.com/Declade/lucairn-research"
-url: "https://lucairn.eu/research"
+url: "https://lucairn.eu/en/research"
 license: MIT
 keywords:
   - "PII detection"
   - "PII redaction"
   - "pseudonymisation"
   - "LLM benchmark"
-  - "EU AI Act"
-  - "Annex III"
   - "HIPAA Safe Harbor"
   - "GLBA NPI"
+  - "EU AI Act"
   - "re-identification risk"
   - "privacy attestation"
   - "AI evidence layer"

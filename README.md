@@ -1,11 +1,11 @@
 # Lucairn Research Program
 
-**Open-source PII detection benchmarks and re-identification risk evaluation for LLM pipelines under the EU AI Act, HIPAA, and GLBA.**
+**Open-source PII detection benchmarks for LLM pipelines on regulated-industry text — measured against HIPAA Safe Harbor (Paper 1) and an operational GLBA NPI enumeration (Paper 2).**
 
-Empirical methodology code behind the per-industry vendor-published benchmark papers at [lucairn.eu/research](https://lucairn.eu/research). Every quantitative claim in every paper traces back to a script in this repo. Clone, install, run.
+Empirical methodology code behind the per-industry vendor-published benchmark papers at [lucairn.eu/en/research](https://lucairn.eu/en/research). Every quantitative claim in every paper traces back to a script in this repo. Clone, install, run.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Papers](https://img.shields.io/badge/papers-2_shipped-blue)](https://lucairn.eu/research)
+[![Papers](https://img.shields.io/badge/papers-2_shipped-blue)](https://lucairn.eu/en/research)
 [![Lucairn](https://img.shields.io/badge/built_by-Lucairn-black)](https://lucairn.eu)
 
 > Lucairn is the AI evidence layer for EU regulated companies. Per-row signed cryptographic certificates over every LLM call, in evidence formats EU AI Act Articles 10, 12, 14, and 15 reference. This repo is the open methodology code behind the benchmark papers. Code is MIT-licensed; per-dataset license is documented in each `datasets/<industry>/RECIPE.md`.
@@ -14,15 +14,15 @@ Empirical methodology code behind the per-industry vendor-published benchmark pa
 
 ## Published papers
 
-| # | Industry | Paper | Dataset | Regulation surface |
+| # | Industry | Paper | Dataset | Regulatory framework cited |
 |---|---|---|---|---|
-| 1 | Healthcare / clinical | **[Clinical PII redaction benchmark (MTSamples, HIPAA Safe Harbor)](https://lucairn.eu/en/research/clinical-pii-redaction-benchmark)** | MTSamples (Kaggle, CC0) + synthetic PII re-injection at i2b2 density | EU AI Act Annex III high-risk healthcare; HIPAA Safe Harbor (45 CFR § 164.514(b)(2)) |
-| 2 | Finance / consumer-banking | **[Financial PII redaction benchmark (CFPB Consumer Complaint Database, GLBA NPI)](https://lucairn.eu/en/research/financial-pii-redaction-benchmark)** | CFPB Consumer Complaint Database (US federal public domain) + synthetic NPI re-injection | EU AI Act Annex III high-risk finance; GLBA NPI (16 CFR Part 313) |
+| 1 | Healthcare / clinical | **[Clinical PII redaction benchmark (MTSamples, HIPAA Safe Harbor)](https://lucairn.eu/en/research/clinical-pii-redaction-benchmark)** | MTSamples (Kaggle, CC0) + synthetic PII re-injection at i2b2 density | HIPAA Safe Harbor enumeration — 45 CFR § 164.514(b)(2)(i) |
+| 2 | Finance / consumer-banking | **[Financial PII redaction benchmark (CFPB Consumer Complaint Database, GLBA NPI)](https://lucairn.eu/en/research/financial-pii-redaction-benchmark)** | CFPB Consumer Complaint Database (US federal public domain) + synthetic NPI re-injection | GLBA NPI — operational enumeration derived from 16 CFR § 313.3(n), 16 CFR Part 314, and PCI-DSS v4.0 |
 
 Each paper is published in three places:
 
-- A canonical landing page on `lucairn.eu/research/<slug>` (linked above)
-- A long-form blog write-up on `lucairn.eu/blog/<slug>` for general readers
+- A canonical landing page on `lucairn.eu/en/research/<slug>` (linked above; the `/research/<slug>` form 307-redirects to the EN-locale path)
+- A long-form blog write-up on `lucairn.eu/en/blog/<slug>` for general readers
 - This repository — full methodology, per-dataset RECIPE, signed-certificate appendices, and the harness code that produced the numbers
 
 ---
@@ -31,7 +31,7 @@ Each paper is published in three places:
 
 The complete, independently-reproducible methodology code behind every Lucairn Research Program paper: dataset acquisition, PII re-injection harness, end-to-end pipeline runner against a Lucairn gateway, per-category recall computation, and per-paper appendix generation.
 
-**Designed for independent reproducibility.** Clone, install, set two environment variables (`LUCAIRN_GATEWAY_URL`, `LUCAIRN_API_KEY`), run `pnpm dataset:download && pnpm dataset:inject-pii && pnpm run pipeline`. A third-party reader who disagrees with a number can re-run it.
+**Designed for independent reproducibility.** Clone, install, set two environment variables (`LUCAIRN_GATEWAY_URL`, `LUCAIRN_API_KEY`), run `pnpm dataset:download && pnpm dataset:inject-pii && pnpm run pipeline -- --live --rows=500` (or `--mock` for a no-credentials smoke run). A third-party reader who disagrees with a number can re-run it. See [Reproduce a paper](#reproduce-a-paper) for the full per-paper command sequences.
 
 ## What this repo is NOT
 
@@ -39,22 +39,19 @@ The complete, independently-reproducible methodology code behind every Lucairn R
 - Not a customer-deployment artifact. These are vendor-published methodology papers; the publisher and the methodology are named in full. No customer attribution, no persona-driven narrative, no attributed endorsement quotes.
 - Not a CLI or a publishable npm package. It is a methodology codebase, run from a clone.
 - Not a customer-implementation report. The artifact frame is a vendor benchmark / methodology paper.
-- Not legal advice. Regulatory references are factual citations to primary sources (EUR-Lex Regulation 2024/1689; HHS HIPAA Safe Harbor enumeration; 16 CFR Part 313 GLBA NPI enumeration; published clinical-NLP de-identification literature); they are not interpretations.
+- Not legal advice. Regulatory references are factual citations to primary sources (EUR-Lex Regulation 2024/1689; HHS HIPAA Safe Harbor enumeration; 16 CFR § 313.3(n)/(o), 16 CFR Part 314, PCI-DSS v4.0 — from which Paper 2's operational 17-category GLBA NPI enumeration is derived, since GLBA defines NPI by exclusion rather than a closed list; published clinical-NLP de-identification literature). They are not interpretations.
 
 ---
 
-## EU AI Act Annex III compliance context
+## What these papers measure (and what they do NOT claim)
 
-EU AI Act enforcement is rolling. The relevant calendar for high-risk classification:
+The Lucairn Research Program publishes **empirical PII detection benchmarks** for LLM pipelines on regulated-industry text. Each paper measures detection-rate and recall against a published category enumeration — HIPAA Safe Harbor for Paper 1, an operational GLBA NPI enumeration for Paper 2 — using a deterministic synthetic re-injection methodology because no publicly redistributable regulated-industry corpus ships with annotated ground-truth PII labels.
 
-- **2 February 2025** — Article 5 prohibitions in force.
-- **2 August 2025** — General-Purpose AI Model (GPAI) obligations in force.
-- **2 August 2026** — Chapter III high-risk-system obligations (Articles 8–15) apply for AI systems newly placed on the market in the Annex III high-risk areas (Article 6(2)). This is the trigger date Paper 1's and Paper 2's measurements are scoped to.
-- **2 August 2027** — Article 6(1) classification (high-risk AI as safety components of products covered by Annex I Union harmonisation legislation) applies. Pre-existing high-risk systems and GPAI models follow the separate timeline in Article 111.
+The papers are **measurement evidence**, not AI Act high-risk-system deployment work. A downstream operator who builds an Annex III high-risk AI system on top of an LLM pipeline can use this kind of empirical PII-detection evidence as one input to a **GDPR Art. 32** (security of processing), **EU AI Act Art. 10** (data and data governance), or **EU AI Act Art. 15** (accuracy, robustness, and cybersecurity) compliance dossier — but the act of running and publishing the benchmark is not itself the deployment of a high-risk AI system. The papers do not adjudicate any specific Annex III use case; "healthcare" and "finance" here name the empirical corpus domain, not an Annex III classification.
 
-Sources: Regulation (EU) 2024/1689 Articles 6, 111, 113; AI Office Service Desk; artificialintelligenceact.eu.
+The signed-certificate methodology (every row produces a signed cert with full lineage) is a property of the Lucairn platform under test, not of the benchmark itself; it incidentally produces lineage evidence relevant to **EU AI Act Art. 12** (record-keeping) for downstream systems that retain those certs.
 
-Each paper's headline measurement is **Cat-1 evidence completeness** (AI Act Articles 10 and 15 — data governance and accuracy/robustness) for a specific Annex III high-risk industry use case. The methodology — every row produces a signed cert with full lineage — incidentally produces evidence relevant to Cat-2 (Article 12 record-keeping) and Cat-3 (the inventory bundle of Articles 10 + 12 + 14 + 15), but those are not the headline claim.
+For the EU AI Act calendar (Article 5 prohibitions in force 2 Feb 2025, GPAI obligations 2 Aug 2025, Chapter III high-risk-system obligations 2 Aug 2026, Article 6(1) classification 2 Aug 2027), see Regulation (EU) 2024/1689 Articles 6, 111, 113 and the EU AI Office Service Desk.
 
 ---
 
@@ -62,17 +59,19 @@ Each paper's headline measurement is **Cat-1 evidence completeness** (AI Act Art
 
 Each paper uses the same two-measurement structure because no publicly redistributable dataset in the regulated industries we care about ships with annotated ground-truth PII labels.
 
-1. **Measurement A — raw-corpus detection.** Lucairn runs over the full corpus. Reports detection counts per regulatory category (HIPAA Safe Harbor for healthcare; GLBA NPI for finance). **No ground-truth recall is claimed** — there is no published per-token annotation.
-2. **Measurement B — known-ground-truth recall.** A 500-row deterministic-seed subset is augmented with synthetic PII at literature-baseline density (~20–25 PHI entities per healthcare note, after Stubbs & Uzuner 2015; equivalent NPI density for finance). Recall and precision are measured against the **known injected entities only**; real residual PII in this subset is acknowledged but not counted as ground truth.
+1. **Measurement A — raw-corpus detection.** Lucairn runs over the **deterministic 500-row carrier subset in its raw pre-injection form** (the same subset Measurement B then augments). Reports detection counts per category (HIPAA Safe Harbor for healthcare; the 17-category operational GLBA NPI enumeration for finance). **No ground-truth recall is claimed** — there is no published per-token annotation against the raw corpus. The 500-row subset (rather than the full corpus) is used for computational tractability and so the same row set carries through into Measurement B with deterministic ground truth.
+2. **Measurement B — known-ground-truth recall.** The same 500-row subset is augmented with synthetic PII at controlled density (~20–25 PHI entities per healthcare note, after Stubbs & Uzuner 2015; equivalent NPI density for finance — set for methodological continuity with Paper 1, not against an empirical finance-corpus baseline). Recall and precision are measured against the **known injected entities only**; real residual PII in this subset is acknowledged but not counted as ground truth.
 
 Full methodology in:
 
 - [`datasets/healthcare/RECIPE.md`](./datasets/healthcare/RECIPE.md) — MTSamples acquisition, HIPAA Safe Harbor category mapping, synthetic PII injection at i2b2 density.
-- [`datasets/finance/RECIPE.md`](./datasets/finance/RECIPE.md) — CFPB Consumer Complaint Database acquisition, GLBA NPI category mapping, synthetic NPI injection.
+- [`datasets/finance/RECIPE.md`](./datasets/finance/RECIPE.md) — CFPB Consumer Complaint Database acquisition, GLBA NPI operational enumeration, synthetic NPI injection.
 
 ---
 
 ## Reproduce a paper
+
+The `run-pipeline.ts` harness requires an explicit auth mode (`--mock` or `--live`) — there is no implicit default. `--mock` mounts an in-process msw mock and needs no credentials; `--live` requires `LUCAIRN_GATEWAY_URL` and `LUCAIRN_API_KEY` in env (or `--gateway` / `--api-key` flags).
 
 ### Paper 1 — Healthcare (HIPAA Safe Harbor, MTSamples)
 
@@ -86,36 +85,79 @@ pnpm dataset:verify-injection # round-trip + SHA-256 check
 pnpm test                     # methodology unit tests
 ```
 
-Then run the harness against a Lucairn gateway (set `LUCAIRN_GATEWAY_URL` and `LUCAIRN_API_KEY`):
+**Mock-only smoke run** (exercises the math layer; no gateway, no credentials):
 
 ```bash
-pnpm run pipeline -- --rows=500 --output=/tmp/paper-1-raw.ndjson
+pnpm run pipeline -- --mock --rows=500 --output=/tmp/paper-1-raw.ndjson
 pnpm run collect-certs -- --input=/tmp/paper-1-raw.ndjson --output=/tmp/paper-1-CERTIFICATES.csv
-pnpm run compute-recall \
-  -- --truth=datasets/healthcare/with-injected-pii/ground-truth.jsonl \
-  --redactions-source=ndjson \
+pnpm run compute-recall -- \
+  --truth=datasets/healthcare/with-injected-pii/ground-truth.jsonl \
+  --input=/tmp/paper-1-raw.ndjson \
   --rows=500 \
   --output=/tmp/paper-1-SUMMARY.json
 ```
 
-For a mock-only smoke run that exercises the math layer without calling a live gateway, append `--mock` to the pipeline command.
+**Live run against a Lucairn gateway** (requires credentials):
+
+```bash
+export LUCAIRN_GATEWAY_URL=https://gateway.lucairn.eu
+export LUCAIRN_API_KEY=lcr_live_...          # or veil_live_... during the legacy-prefix grace window
+pnpm run pipeline -- --live --rows=500 --output=/tmp/paper-1-raw.ndjson
+# collect-certs + compute-recall are identical to the mock-run invocations above.
+```
 
 ### Paper 2 — Finance (GLBA NPI, CFPB Consumer Complaint Database)
+
+There is no `--industry=` flag — Paper 2 is run by pointing the harness's `--truth`, `--subset`, and `--narrative-column` flags at the finance dataset, and analyzed with `analyze:finance` (which uses GLBA-category mapping instead of HIPAA).
 
 ```bash
 pnpm dataset:download:finance          # downloads complaints.csv.zip from CFPB public file server
 pnpm dataset:inject-finance-pii        # deterministic Faker-seeded NPI injection
 pnpm dataset:verify-finance-injection  # round-trip + SHA-256 check
-pnpm run pipeline -- --industry=finance --rows=500 --output=/tmp/paper-2-raw.ndjson
-pnpm run analyze:finance -- --input=/tmp/paper-2-raw.ndjson
 ```
+
+**Mock-only smoke run:**
+
+```bash
+pnpm run pipeline -- --mock \
+  --truth=datasets/finance/with-injected-pii/ground-truth.jsonl \
+  --subset=datasets/finance/with-injected-pii/measurement-b-subset.csv \
+  --narrative-column='Consumer complaint narrative' \
+  --activity-id-prefix=paper-2-finance \
+  --rows=500 \
+  --output=/tmp/paper-2-raw.ndjson
+
+pnpm run analyze:finance -- \
+  --input=/tmp/paper-2-raw.ndjson \
+  --output=/tmp/paper-2-SUMMARY.json
+```
+
+**Live run against a Lucairn gateway:**
+
+```bash
+export LUCAIRN_GATEWAY_URL=https://gateway.lucairn.eu
+export LUCAIRN_API_KEY=lcr_live_...          # or veil_live_... during the legacy-prefix grace window
+pnpm run pipeline -- --live \
+  --truth=datasets/finance/with-injected-pii/ground-truth.jsonl \
+  --subset=datasets/finance/with-injected-pii/measurement-b-subset.csv \
+  --narrative-column='Consumer complaint narrative' \
+  --activity-id-prefix=paper-2-finance \
+  --rows=500 \
+  --output=/tmp/paper-2-raw.ndjson
+
+pnpm run analyze:finance -- \
+  --input=/tmp/paper-2-raw.ndjson \
+  --output=/tmp/paper-2-SUMMARY.json
+```
+
+Full per-flag reference: `pnpm run pipeline -- --help`.
 
 ### Prerequisites
 
 - Node.js ≥ 18.17 (matches `package.json` `engines.node`)
 - pnpm 10.x
 - Kaggle CLI installed (`pipx install kaggle`) with a working `~/.kaggle/kaggle.json` API token (Paper 1 only — Paper 2's CFPB dataset is downloaded via direct HTTPS).
-- A Lucairn gateway URL + API key for the live harness (for mock-only smoke runs neither is required).
+- For a live run: a Lucairn gateway URL + API key (`LUCAIRN_GATEWAY_URL` + `LUCAIRN_API_KEY`). Mock-only smoke runs (`--mock`) need neither.
 
 ---
 
@@ -169,7 +211,7 @@ lucairn-research/
 
 ## Citation
 
-A machine-readable citation is in [`CITATION.cff`](./CITATION.cff) (GitHub's "Cite this repository" feature surfaces it on the repo sidebar). For a specific paper, cite the paper's canonical URL on `lucairn.eu/research/<slug>` and the repository commit SHA that produced its `SUMMARY.json`.
+A machine-readable citation is in [`CITATION.cff`](./CITATION.cff) (GitHub's "Cite this repository" feature surfaces it on the repo sidebar). For a specific paper, cite the paper's canonical URL on `lucairn.eu/en/research/<slug>` and the repository commit SHA that produced its `SUMMARY.json`.
 
 ---
 
@@ -184,6 +226,6 @@ A machine-readable citation is in [`CITATION.cff`](./CITATION.cff) (GitHub's "Ci
 
 ## Related Lucairn surfaces
 
-- [lucairn.eu/research](https://lucairn.eu/research) — Research Program index, paper landing pages.
-- [lucairn.eu/blog](https://lucairn.eu/blog) — Long-form blog write-ups, including non-paper engineering posts (architecture, compliance, hardware evaluation).
+- [lucairn.eu/en/research](https://lucairn.eu/en/research) — Research Program index, paper landing pages.
+- [lucairn.eu/en/blog](https://lucairn.eu/en/blog) — Long-form blog write-ups, including non-paper engineering posts (architecture, compliance, hardware evaluation).
 - [lucairn.eu](https://lucairn.eu) — Lucairn platform homepage (the product behind the methodology).
