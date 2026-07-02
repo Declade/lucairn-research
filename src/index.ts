@@ -58,3 +58,28 @@ export {
 } from './recall.js';
 
 export { emitCsv, parseCsv, type CsvRow } from './csv.js';
+
+// --- REDACT eval harness (PRD Slice 10) ---
+// Deliberately separate taxonomy from the HIPAA/GLBA exports above — see
+// src/redact-eval/schema.ts doc-comment for why this is not merged into the
+// existing recall.ts / redaction-extractor.ts modules.
+export {
+  GDPR_TIERS,
+  MATCH_MODES,
+  type EvalRecord,
+  type GdprTier,
+  type GoldEntity,
+  type MatchMode,
+  type PredictedEntity,
+  type PredictedRecord,
+} from './redact-eval/schema.js';
+
+export {
+  type RateTriple,
+  type ScoreSummary,
+  scoreRecords,
+} from './redact-eval/scorer.js';
+
+export { redactRecordToInternal } from './redact-eval/adapters/redact.js';
+
+export { SYNTHETIC_MULTILINGUAL_FIXTURE } from './redact-eval/fixtures/synthetic-multilingual.js';
