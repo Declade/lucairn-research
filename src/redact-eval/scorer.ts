@@ -33,6 +33,16 @@
  * `overall`/`perLanguage`, is excluded from `perGdprTier` (there is no
  * bucket to put it in), and is surfaced via `notes` — never silently
  * dropped.
+ *
+ * A malformed GOLD span (`end <= start`) can never resolve to a TP (it is
+ * excluded from candidate generation entirely — see `matchRecordSpans`), but
+ * it is still a gold annotation and MUST fail closed as an FN rather than
+ * being excluded from the recall denominator: dropping it would silently
+ * inflate recall. It is bucketed exactly like a normal FN (per-language,
+ * per-GDPR-tier or `unknownTierGold` for an out-of-set tier) and also
+ * contributes to the "zero-length/malformed span(s) skipped" note. A
+ * malformed PREDICTION, by contrast, is simply skipped and never becomes an
+ * FP (it asserted nothing coherent to be wrong about).
  */
 
 import type {
@@ -206,7 +216,19 @@ export function scoreRecords(
 
     record.goldEntities.forEach((g, goldIndex) => {
       if (isMalformedSpan(g)) {
+        // A malformed gold span (end <= start) can never be a TP — it was
+        // excluded from candidate generation in matchRecordSpans — but it is
+        // still a gold annotation and MUST fail closed as an FN rather than
+        // being dropped from the recall denominator entirely (that would
+        // inflate recall). Route it through the SAME tier-bucketing as a
+        // normal FN so the sum(perGdprTier.fn) + unknownTierGold ==
+        // overall.fn invariant still holds.
         malformedSpanCount += 1;
+        const tierBucket = perTierCounts.get(g.gdprTier);
+        if (!tierBucket) unknownTierGold += 1;
+        overallCounts.fn += 1;
+        langBucket.fn += 1;
+        if (tierBucket) tierBucket.fn += 1;
         return;
       }
       const matched = goldIndexToPredIndex.has(goldIndex);

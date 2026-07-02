@@ -279,7 +279,10 @@ describe('scoreRecords — output SHAPE (not model numbers)', () => {
     // A zero-length gold span and a zero-length prediction at the identical
     // position. A buggy matcher would treat identical [start,end) as an
     // "exact" match and count it as a TP; zero-length spans are malformed
-    // and must be excluded from matching entirely on both sides.
+    // and must be excluded from matching entirely on both sides. The
+    // malformed GOLD span can never be a TP, so it fails closed as an FN
+    // (see Codex r2 High-3 regression test below) — it does NOT vanish from
+    // the denominator, so fn is 1, not 0.
     const record: EvalRecord = {
       text: 'some text',
       language: 'en',
@@ -293,7 +296,40 @@ describe('scoreRecords — output SHAPE (not model numbers)', () => {
 
     expect(summary.overall.tp).toBe(0);
     expect(summary.overall.fp).toBe(0);
-    expect(summary.overall.fn).toBe(0);
+    expect(summary.overall.fn).toBe(1);
+    expect(summary.notes.some((n) => /zero-length\/malformed span\(s\) skipped/iu.test(n))).toBe(true);
+  });
+
+  it('a malformed gold entity fails closed as an FN, not dropped from the recall denominator (regression: Codex r2 High-3)', () => {
+    // Two gold entities: one well-formed PERSON (MED tier), one malformed
+    // NATIONAL_ID (HIGH tier, end<=start). Predictions match the well-formed
+    // one exactly and say nothing about the malformed one. A buggy scorer
+    // that `return`s on the malformed gold BEFORE TP/FN accounting drops it
+    // from the denominator entirely, inflating recall to 1/1=1 instead of
+    // the correct 1/2=0.5.
+    const records: EvalRecord[] = [
+      {
+        text: 'abcdxx',
+        language: 'en',
+        goldEntities: [
+          { start: 0, end: 4, type: 'PERSON', gdprTier: 'MED' },
+          { start: 6, end: 6, type: 'NATIONAL_ID', gdprTier: 'HIGH' },
+        ],
+      },
+    ];
+    const predictions: PredictedRecord[] = [
+      { recordIndex: 0, predictions: [{ start: 0, end: 4, type: 'PERSON', gdprTier: 'MED' }] },
+    ];
+
+    const summary = scoreRecords(records, predictions, 'exact');
+
+    expect(summary.overall).toEqual(
+      expect.objectContaining({ tp: 1, fp: 0, fn: 1, recall: 0.5 }),
+    );
+    const enBucket = summary.perLanguage.find((l) => l.language === 'en');
+    expect(enBucket?.counts.fn).toBe(1);
+    const byTier = new Map(summary.perGdprTier.map((t) => [t.gdprTier, t.counts]));
+    expect(byTier.get('HIGH')?.fn).toBe(1);
     expect(summary.notes.some((n) => /zero-length\/malformed span\(s\) skipped/iu.test(n))).toBe(true);
   });
 });
