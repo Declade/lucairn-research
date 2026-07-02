@@ -92,9 +92,15 @@ function spansEqual(a: { start: number; end: number }, b: { start: number; end: 
   return a.start === b.start && a.end === b.end;
 }
 
+/** A span is malformed (empty or inverted) if its half-open interval has zero or negative length. */
+function isMalformedSpan(s: { start: number; end: number }): boolean {
+  return s.end <= s.start;
+}
+
 interface RecordMatchResult {
-  goldToPred: Map<GoldEntity, PredictedEntity>;
-  predMatched: Set<PredictedEntity>;
+  /** Keyed by INDEX into the `gold` array passed to `matchRecordSpans`, not by object identity — two `===`-equal (or reference-identical) gold/pred entries at different indices must be tracked independently. */
+  goldIndexToPredIndex: Map<number, number>;
+  matchedPredIndices: Set<number>;
 }
 
 /**
@@ -105,6 +111,13 @@ interface RecordMatchResult {
  * `src/recall.ts::matchSpans`). In "exact" mode every candidate's overlap
  * fraction is 1.0 (the spans are equal), so the primary key is inert there
  * and ties fall through to the start/length secondary keys as before.
+ *
+ * Matching is tracked by ARRAY INDEX, not object identity: two array entries
+ * that are the same object reference (or two distinct objects with equal
+ * field values) are still two distinct entities, each consumable at most
+ * once. Zero-length (malformed, `end <= start`) spans are excluded from
+ * candidate generation entirely for both gold and predictions — they cannot
+ * legitimately overlap anything and must never resolve to a TP.
  */
 function matchRecordSpans(
   gold: readonly GoldEntity[],
@@ -112,38 +125,47 @@ function matchRecordSpans(
   matchMode: MatchMode,
 ): RecordMatchResult {
   const candidates: Array<{
-    gold: GoldEntity;
-    pred: PredictedEntity;
+    goldIndex: number;
+    predIndex: number;
+    predStart: number;
     predLen: number;
     overlapFraction: number;
   }> = [];
-  for (const g of gold) {
-    const goldLen = Math.max(0, g.end - g.start);
-    for (const p of predictions) {
+  gold.forEach((g, goldIndex) => {
+    if (isMalformedSpan(g)) return;
+    const goldLen = g.end - g.start;
+    predictions.forEach((p, predIndex) => {
+      if (isMalformedSpan(p)) return;
       const isCandidate = matchMode === 'exact' ? spansEqual(g, p) : overlaps(g, p);
       if (isCandidate) {
         const overlap = Math.max(0, Math.min(g.end, p.end) - Math.max(g.start, p.start));
         const overlapFraction = goldLen === 0 ? 0 : overlap / goldLen;
-        candidates.push({ gold: g, pred: p, predLen: Math.max(0, p.end - p.start), overlapFraction });
+        candidates.push({
+          goldIndex,
+          predIndex,
+          predStart: p.start,
+          predLen: Math.max(0, p.end - p.start),
+          overlapFraction,
+        });
       }
-    }
-  }
+    });
+  });
   candidates.sort((a, b) => {
     if (b.overlapFraction !== a.overlapFraction) return b.overlapFraction - a.overlapFraction;
-    if (a.pred.start !== b.pred.start) return a.pred.start - b.pred.start;
+    if (a.predStart !== b.predStart) return a.predStart - b.predStart;
     return a.predLen - b.predLen;
   });
 
-  const goldMatched = new Set<GoldEntity>();
-  const predMatched = new Set<PredictedEntity>();
-  const goldToPred = new Map<GoldEntity, PredictedEntity>();
+  const matchedGoldIndices = new Set<number>();
+  const matchedPredIndices = new Set<number>();
+  const goldIndexToPredIndex = new Map<number, number>();
   for (const c of candidates) {
-    if (goldMatched.has(c.gold) || predMatched.has(c.pred)) continue;
-    goldMatched.add(c.gold);
-    predMatched.add(c.pred);
-    goldToPred.set(c.gold, c.pred);
+    if (matchedGoldIndices.has(c.goldIndex) || matchedPredIndices.has(c.predIndex)) continue;
+    matchedGoldIndices.add(c.goldIndex);
+    matchedPredIndices.add(c.predIndex);
+    goldIndexToPredIndex.set(c.goldIndex, c.predIndex);
   }
-  return { goldToPred, predMatched };
+  return { goldIndexToPredIndex, matchedPredIndices };
 }
 
 /**
@@ -169,16 +191,25 @@ export function scoreRecords(
 
   let unknownTierFp = 0;
   let unknownTierGold = 0;
+  let malformedSpanCount = 0;
 
   records.forEach((record, recordIndex) => {
     const predictions = predsByIndex.get(recordIndex) ?? [];
-    const { goldToPred, predMatched } = matchRecordSpans(record.goldEntities, predictions, matchMode);
+    const { goldIndexToPredIndex, matchedPredIndices } = matchRecordSpans(
+      record.goldEntities,
+      predictions,
+      matchMode,
+    );
 
     const langBucket = perLanguageCounts.get(record.language) ?? emptyCounts();
     perLanguageCounts.set(record.language, langBucket);
 
-    for (const g of record.goldEntities) {
-      const matched = goldToPred.has(g);
+    record.goldEntities.forEach((g, goldIndex) => {
+      if (isMalformedSpan(g)) {
+        malformedSpanCount += 1;
+        return;
+      }
+      const matched = goldIndexToPredIndex.has(goldIndex);
       const tierBucket = perTierCounts.get(g.gdprTier);
       if (!tierBucket) unknownTierGold += 1;
       if (matched) {
@@ -190,9 +221,13 @@ export function scoreRecords(
         langBucket.fn += 1;
         if (tierBucket) tierBucket.fn += 1;
       }
-    }
-    for (const p of predictions) {
-      if (predMatched.has(p)) continue;
+    });
+    predictions.forEach((p, predIndex) => {
+      if (isMalformedSpan(p)) {
+        malformedSpanCount += 1;
+        return;
+      }
+      if (matchedPredIndices.has(predIndex)) return;
       overallCounts.fp += 1;
       langBucket.fp += 1;
       if (p.gdprTier !== undefined) {
@@ -201,7 +236,7 @@ export function scoreRecords(
       } else {
         unknownTierFp += 1;
       }
-    }
+    });
   });
 
   const perLanguage = Array.from(perLanguageCounts.entries())
@@ -225,6 +260,9 @@ export function scoreRecords(
       `${unknownTierGold} gold entity(ies) had a gdprTier outside HIGH/MED/LOW and are ` +
         'included in overall but not in any perGdprTier bucket.',
     );
+  }
+  if (malformedSpanCount > 0) {
+    notes.push(`${malformedSpanCount} zero-length/malformed span(s) skipped.`);
   }
 
   return {
