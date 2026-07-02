@@ -249,6 +249,53 @@ describe('scoreRecords — output SHAPE (not model numbers)', () => {
     // Surfaced via notes, mirroring the FP-side unknown-tier note.
     expect(summary.notes.some((n) => /gdprTier outside HIGH\/MED\/LOW/iu.test(n))).toBe(true);
   });
+
+  it('match-tracking uses array index, not object identity: the SAME gold object pushed twice can only close one position (regression: Codex r1 High-1)', () => {
+    // A single gold entity object, pushed into goldEntities TWICE (same
+    // reference). A buggy identity-based Set/Map would mark BOTH array
+    // positions "matched" the instant either one is matched, because
+    // `Set.has(obj)` / `Map.has(obj)` can't distinguish the two positions
+    // when they're the same reference. Correct index-based tracking must
+    // treat them as two distinct gold positions, of which only one can be
+    // closed by one prediction.
+    const sharedGold = { start: 0, end: 4, type: 'PERSON', gdprTier: 'MED' as GdprTier };
+    const record: EvalRecord = {
+      text: 'name xxxx',
+      language: 'en',
+      goldEntities: [sharedGold, sharedGold],
+    };
+    const predictions: PredictedRecord[] = [
+      { recordIndex: 0, predictions: [{ start: 0, end: 4, type: 'PERSON', gdprTier: 'MED' }] },
+    ];
+
+    const summary = scoreRecords([record], predictions, 'exact');
+
+    expect(summary.overall.tp).toBe(1);
+    expect(summary.overall.fn).toBe(1);
+    expect(summary.overall.recall).toBe(0.5);
+  });
+
+  it('zero-length (malformed) spans never resolve to a TP and are surfaced via notes, not silently scored (regression: Codex r1 Medium-2)', () => {
+    // A zero-length gold span and a zero-length prediction at the identical
+    // position. A buggy matcher would treat identical [start,end) as an
+    // "exact" match and count it as a TP; zero-length spans are malformed
+    // and must be excluded from matching entirely on both sides.
+    const record: EvalRecord = {
+      text: 'some text',
+      language: 'en',
+      goldEntities: [{ start: 2, end: 2, type: 'PERSON', gdprTier: 'MED' }],
+    };
+    const predictions: PredictedRecord[] = [
+      { recordIndex: 0, predictions: [{ start: 2, end: 2, type: 'PERSON', gdprTier: 'MED' }] },
+    ];
+
+    const summary = scoreRecords([record], predictions, 'exact');
+
+    expect(summary.overall.tp).toBe(0);
+    expect(summary.overall.fp).toBe(0);
+    expect(summary.overall.fn).toBe(0);
+    expect(summary.notes.some((n) => /zero-length\/malformed span\(s\) skipped/iu.test(n))).toBe(true);
+  });
 });
 
 describe('redactRecordToInternal — intentional stub (NEVER-GUESS boundary)', () => {
