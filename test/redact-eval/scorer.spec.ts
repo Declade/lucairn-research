@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { GDPR_TIERS } from '../../src/redact-eval/schema.js';
-import type { PredictedEntity, PredictedRecord } from '../../src/redact-eval/schema.js';
+import type { EvalRecord, GdprTier, PredictedEntity, PredictedRecord } from '../../src/redact-eval/schema.js';
 import { scoreRecords } from '../../src/redact-eval/scorer.js';
 import { SYNTHETIC_MULTILINGUAL_FIXTURE } from '../../src/redact-eval/fixtures/synthetic-multilingual.js';
 import { redactRecordToInternal } from '../../src/redact-eval/adapters/redact.js';
@@ -173,6 +173,81 @@ describe('scoreRecords — output SHAPE (not model numbers)', () => {
       expect(tier.counts.fp).toBe(0);
     }
     expect(summary.notes.some((n) => /no asserted gdprTier/iu.test(n))).toBe(true);
+  });
+
+  it('matcher ranks candidates by overlap fraction first, mirroring src/recall.ts::matchSpans (regression: was pred.start/predLen only)', () => {
+    // One record, two gold entities: Gc=[8,12) listed FIRST, Go=[2,6) listed
+    // second — the ordering matters because a buggy start-first sort would
+    // process Pa=[0,10) before Pb=[8,12) regardless of overlap quality.
+    // Two predictions: Pa=[0,10) overlaps BOTH golds (partially: 2 chars of
+    // Go, 2 chars of Gc) and Pb=[8,12) overlaps ONLY Gc, but EXACTLY (100%
+    // overlap fraction vs Gc's 4-char length).
+    //
+    // Correct (overlap-fraction-primary) greedy assignment:
+    //   Pb vs Gc has overlapFraction 1.0 (highest) -> assigned first: Gc<->Pb.
+    //   Pa vs Go has overlapFraction 0.5 (2 of 4 chars) -> assigned next: Go<->Pa.
+    //   Result: tp=2, fp=0, fn=0, recall=1.0.
+    //
+    // Buggy (pred.start-primary) greedy assignment sorts candidate pairs by
+    // pred.start then predLen only, ignoring overlap quality: both
+    // gold/pred candidate pairs involving Pa (start=0) sort ahead of the
+    // Gc/Pb pair (start=8), so Pa is greedily assigned to whichever gold is
+    // iterated first (Gc), leaving Go unmatched and Pb unused. Net effect:
+    // tp=1, fn=1, recall=0.5.
+    const record: EvalRecord = {
+      text: 'xx go xx gc xx',
+      language: 'en',
+      goldEntities: [
+        { start: 8, end: 12, type: 'ID', gdprTier: 'HIGH' }, // Gc
+        { start: 2, end: 6, type: 'ID', gdprTier: 'HIGH' }, // Go
+      ],
+    };
+    const predictions: PredictedRecord[] = [
+      {
+        recordIndex: 0,
+        predictions: [
+          { start: 0, end: 10, type: 'ID' }, // Pa
+          { start: 8, end: 12, type: 'ID' }, // Pb
+        ],
+      },
+    ];
+
+    const summary = scoreRecords([record], predictions, 'partial-overlap');
+    expect(summary.overall).toEqual(
+      expect.objectContaining({ tp: 2, fp: 0, fn: 0, recall: 1 }),
+    );
+  });
+
+  it('a gold entity with an out-of-set gdprTier is counted in overall but noted, not silently dropped (regression: was silently skipped)', () => {
+    // Cast through unknown: the TS type is closed to HIGH/MED/LOW, but data
+    // crossing a JSON/adapter boundary is not guaranteed to respect it —
+    // this is exactly the runtime case the fix defends against.
+    const badTier = 'CRIMINAL' as unknown as GdprTier;
+    const record: EvalRecord = {
+      text: 'gold entity text',
+      language: 'en',
+      goldEntities: [{ start: 0, end: 4, type: 'OFFENCE', gdprTier: badTier }],
+    };
+    const predictions: PredictedRecord[] = [
+      { recordIndex: 0, predictions: [{ start: 0, end: 4, type: 'OFFENCE', gdprTier: badTier }] },
+    ];
+
+    const summary = scoreRecords([record], predictions, 'exact');
+
+    // Still counted in overall (and perLanguage) — not dropped.
+    expect(summary.overall.tp).toBe(1);
+    expect(summary.overall.fn).toBe(0);
+    const enBucket = summary.perLanguage.find((l) => l.language === 'en');
+    expect(enBucket?.counts.tp).toBe(1);
+
+    // No perGdprTier bucket exists for it (bucket-total invariant: this gold
+    // entity is intentionally absent from HIGH/MED/LOW).
+    for (const tier of summary.perGdprTier) {
+      expect(tier.counts.tp).toBe(0);
+    }
+
+    // Surfaced via notes, mirroring the FP-side unknown-tier note.
+    expect(summary.notes.some((n) => /gdprTier outside HIGH\/MED\/LOW/iu.test(n))).toBe(true);
   });
 });
 

@@ -17,7 +17,8 @@
  *   - "partial-overlap": any character overlap (> 0) counts as a candidate
  *     match.
  * In both modes, matching is greedy 1:1 (each gold entity matches at most
- * one prediction and vice versa) within a single record; ties break by
+ * one prediction and vice versa) within a single record; candidates are
+ * ranked by overlap fraction (overlap chars ÷ gold length) descending, then
  * earliest predicted start, then shortest predicted span — fully
  * deterministic, same tie-break convention as `src/recall.ts`.
  *
@@ -25,7 +26,13 @@
  * know was actually present), and the PREDICTED entity's asserted tier for
  * FP when known; an FP with no asserted tier is counted in `overall` only
  * and surfaced via `notes`, mirroring the "unknown bucket" pattern in
- * `src/recall.ts::aggregateExtracted`.
+ * `src/recall.ts::aggregateExtracted`. The same defensive handling applies
+ * to a GOLD entity whose `gdprTier` falls outside HIGH/MED/LOW (the type is
+ * closed at the TypeScript boundary, but data crossing a JSON/adapter
+ * boundary is not guaranteed to respect it): it still counts in
+ * `overall`/`perLanguage`, is excluded from `perGdprTier` (there is no
+ * bucket to put it in), and is surfaced via `notes` — never silently
+ * dropped.
  */
 
 import type {
@@ -92,25 +99,37 @@ interface RecordMatchResult {
 
 /**
  * Greedy 1:1 span matcher for a single record. Candidate pairs are those
- * satisfying the selected `matchMode`; ties resolve by earliest predicted
- * start then shortest predicted span (deterministic, mirrors
- * `src/recall.ts::matchSpans`).
+ * satisfying the selected `matchMode`; ties resolve by highest overlap
+ * fraction (overlap chars ÷ gold length) descending, then earliest predicted
+ * start, then shortest predicted span (deterministic, mirrors
+ * `src/recall.ts::matchSpans`). In "exact" mode every candidate's overlap
+ * fraction is 1.0 (the spans are equal), so the primary key is inert there
+ * and ties fall through to the start/length secondary keys as before.
  */
 function matchRecordSpans(
   gold: readonly GoldEntity[],
   predictions: readonly PredictedEntity[],
   matchMode: MatchMode,
 ): RecordMatchResult {
-  const candidates: Array<{ gold: GoldEntity; pred: PredictedEntity; predLen: number }> = [];
+  const candidates: Array<{
+    gold: GoldEntity;
+    pred: PredictedEntity;
+    predLen: number;
+    overlapFraction: number;
+  }> = [];
   for (const g of gold) {
+    const goldLen = Math.max(0, g.end - g.start);
     for (const p of predictions) {
       const isCandidate = matchMode === 'exact' ? spansEqual(g, p) : overlaps(g, p);
       if (isCandidate) {
-        candidates.push({ gold: g, pred: p, predLen: Math.max(0, p.end - p.start) });
+        const overlap = Math.max(0, Math.min(g.end, p.end) - Math.max(g.start, p.start));
+        const overlapFraction = goldLen === 0 ? 0 : overlap / goldLen;
+        candidates.push({ gold: g, pred: p, predLen: Math.max(0, p.end - p.start), overlapFraction });
       }
     }
   }
   candidates.sort((a, b) => {
+    if (b.overlapFraction !== a.overlapFraction) return b.overlapFraction - a.overlapFraction;
     if (a.pred.start !== b.pred.start) return a.pred.start - b.pred.start;
     return a.predLen - b.predLen;
   });
@@ -149,6 +168,7 @@ export function scoreRecords(
   for (const tier of GDPR_TIERS) perTierCounts.set(tier, emptyCounts());
 
   let unknownTierFp = 0;
+  let unknownTierGold = 0;
 
   records.forEach((record, recordIndex) => {
     const predictions = predsByIndex.get(recordIndex) ?? [];
@@ -160,6 +180,7 @@ export function scoreRecords(
     for (const g of record.goldEntities) {
       const matched = goldToPred.has(g);
       const tierBucket = perTierCounts.get(g.gdprTier);
+      if (!tierBucket) unknownTierGold += 1;
       if (matched) {
         overallCounts.tp += 1;
         langBucket.tp += 1;
@@ -197,6 +218,12 @@ export function scoreRecords(
     notes.push(
       `${unknownTierFp} false-positive prediction(s) had no asserted gdprTier and are ` +
         'included in overall.fp but not in any perGdprTier bucket.',
+    );
+  }
+  if (unknownTierGold > 0) {
+    notes.push(
+      `${unknownTierGold} gold entity(ies) had a gdprTier outside HIGH/MED/LOW and are ` +
+        'included in overall but not in any perGdprTier bucket.',
     );
   }
 
