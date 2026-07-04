@@ -1,0 +1,512 @@
+{
+  "schema_version": "1.0",
+  "generator": "lucairn-research/scripts/run-itsm-baseline.ts",
+  "bracket": "S5-BASELINE (pre-Slice-3, current L1+L2 sanitizer code)",
+  "prd": "Opus Advisor/specs/prd-2026-07-04-redaction-quality-overhaul.md",
+  "probe_meta": {
+    "sanitizer_source": "$DSA_SANITIZER_DIR",
+    "config_source": "$DSA_CONFIG_DIR/default-sanitizer.yaml",
+    "presidio_confidence_threshold": 0.35,
+    "custom_recognizer_count": 42,
+    "l1_identity_fields_seeded": 0,
+    "note": "L1 KnownEntityMatcher run with empty identity_fields (no customer directory to seed on synthetic freetext fixtures) -- see script docstring."
+  },
+  "unresolved_spans": [],
+  "score_summary": {
+    "schema_version": "1.0",
+    "generator": "lucairn-research/redact-eval/scorer.ts",
+    "matchMode": "partial-overlap",
+    "overall": {
+      "tp": 20,
+      "fp": 12,
+      "fn": 0,
+      "recall": 1,
+      "precision": 0.625,
+      "f1": 0.7692307692307693
+    },
+    "perLanguage": [
+      {
+        "language": "en",
+        "counts": {
+          "tp": 20,
+          "fp": 12,
+          "fn": 0,
+          "recall": 1,
+          "precision": 0.625,
+          "f1": 0.7692307692307693
+        }
+      }
+    ],
+    "perGdprTier": [
+      {
+        "gdprTier": "HIGH",
+        "counts": {
+          "tp": 2,
+          "fp": 2,
+          "fn": 0,
+          "recall": 1,
+          "precision": 0.5,
+          "f1": 0.6666666666666666
+        }
+      },
+      {
+        "gdprTier": "MED",
+        "counts": {
+          "tp": 8,
+          "fp": 5,
+          "fn": 0,
+          "recall": 1,
+          "precision": 0.6153846153846154,
+          "f1": 0.761904761904762
+        }
+      },
+      {
+        "gdprTier": "LOW",
+        "counts": {
+          "tp": 10,
+          "fp": 5,
+          "fn": 0,
+          "recall": 1,
+          "precision": 0.6666666666666666,
+          "f1": 0.8
+        }
+      }
+    ],
+    "notes": []
+  },
+  "per_fixture": [
+    {
+      "id": "itsm-001-timestamp-fp",
+      "gold": [
+        {
+          "start": 9,
+          "end": 19,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000059"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 51,
+          "end": 64,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "2026-06-05 09"
+        },
+        {
+          "start": 109,
+          "end": 122,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "2026-06-05 09"
+        },
+        {
+          "start": 35,
+          "end": 49,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "sys_created_on"
+        },
+        {
+          "start": 9,
+          "end": 19,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000059"
+        }
+      ]
+    },
+    {
+      "id": "itsm-002-ticket-prefix-person-fp",
+      "gold": [
+        {
+          "start": 46,
+          "end": 56,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000112"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 39,
+          "end": 56,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Ticket INC0000112"
+        }
+      ]
+    },
+    {
+      "id": "itsm-003-sys-id-fp",
+      "gold": [
+        {
+          "start": 108,
+          "end": 118,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "PRB0040233"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 108,
+          "end": 118,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "PRB0040233"
+        },
+        {
+          "start": 63,
+          "end": 95,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+        },
+        {
+          "start": 8,
+          "end": 40,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+        }
+      ]
+    },
+    {
+      "id": "itsm-004-field-name-fp",
+      "gold": [],
+      "predicted": [
+        {
+          "start": 10,
+          "end": 24,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "sys_created_on"
+        }
+      ]
+    },
+    {
+      "id": "itsm-005-md-url-fp",
+      "gold": [
+        {
+          "start": 120,
+          "end": 130,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000287"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 120,
+          "end": 130,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000287"
+        },
+        {
+          "start": 92,
+          "end": 104,
+          "type": "URL",
+          "gdprTier": "LOW",
+          "text": "CHANGELOG.md"
+        },
+        {
+          "start": 78,
+          "end": 87,
+          "type": "URL",
+          "gdprTier": "LOW",
+          "text": "README.md"
+        },
+        {
+          "start": 24,
+          "end": 44,
+          "type": "URL",
+          "gdprTier": "LOW",
+          "text": "incident-response.md"
+        }
+      ]
+    },
+    {
+      "id": "itsm-006-iso-date-no-context-fp",
+      "gold": [
+        {
+          "start": 58,
+          "end": 68,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000391"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 58,
+          "end": 68,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000391"
+        },
+        {
+          "start": 33,
+          "end": 43,
+          "type": "DOB",
+          "gdprTier": "HIGH",
+          "text": "2026-08-14"
+        }
+      ]
+    },
+    {
+      "id": "itsm-007-real-pii-name-email-phone",
+      "gold": [
+        {
+          "start": 7,
+          "end": 20,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Erika Schmidt"
+        },
+        {
+          "start": 22,
+          "end": 47,
+          "type": "EMAIL",
+          "gdprTier": "MED",
+          "text": "erika.schmidt@example.com"
+        },
+        {
+          "start": 49,
+          "end": 63,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "+49 30 1234567"
+        },
+        {
+          "start": 112,
+          "end": 122,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000512"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 112,
+          "end": 122,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000512"
+        },
+        {
+          "start": 49,
+          "end": 63,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "+49 30 1234567"
+        },
+        {
+          "start": 22,
+          "end": 47,
+          "type": "EMAIL",
+          "gdprTier": "MED",
+          "text": "erika.schmidt@example.com"
+        },
+        {
+          "start": 7,
+          "end": 20,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Erika Schmidt"
+        }
+      ]
+    },
+    {
+      "id": "itsm-008-real-pii-dob-with-birth-context",
+      "gold": [
+        {
+          "start": 27,
+          "end": 39,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Markus Weber"
+        },
+        {
+          "start": 55,
+          "end": 65,
+          "type": "DOB",
+          "gdprTier": "HIGH",
+          "text": "14.03.1985"
+        },
+        {
+          "start": 88,
+          "end": 98,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000633"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 88,
+          "end": 98,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000633"
+        },
+        {
+          "start": 55,
+          "end": 65,
+          "type": "DOB",
+          "gdprTier": "HIGH",
+          "text": "14.03.1985"
+        },
+        {
+          "start": 27,
+          "end": 39,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Markus Weber"
+        }
+      ]
+    },
+    {
+      "id": "itsm-009-real-pii-iban",
+      "gold": [
+        {
+          "start": 20,
+          "end": 30,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Anna Klein"
+        },
+        {
+          "start": 32,
+          "end": 54,
+          "type": "EMAIL",
+          "gdprTier": "MED",
+          "text": "anna.klein@example.com"
+        },
+        {
+          "start": 70,
+          "end": 92,
+          "type": "IBAN",
+          "gdprTier": "HIGH",
+          "text": "DE89370400440532013000"
+        },
+        {
+          "start": 123,
+          "end": 133,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000701"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 123,
+          "end": 133,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000701"
+        },
+        {
+          "start": 70,
+          "end": 92,
+          "type": "IBAN",
+          "gdprTier": "HIGH",
+          "text": "DE89370400440532013000"
+        },
+        {
+          "start": 32,
+          "end": 54,
+          "type": "EMAIL",
+          "gdprTier": "MED",
+          "text": "anna.klein@example.com"
+        },
+        {
+          "start": 20,
+          "end": 30,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Anna Klein"
+        }
+      ]
+    },
+    {
+      "id": "itsm-010-mixed-record",
+      "gold": [
+        {
+          "start": 65,
+          "end": 78,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Julia Fischer"
+        },
+        {
+          "start": 86,
+          "end": 100,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "+49 89 9876543"
+        },
+        {
+          "start": 113,
+          "end": 123,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000845"
+        },
+        {
+          "start": 128,
+          "end": 138,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "PRB0040288"
+        }
+      ],
+      "predicted": [
+        {
+          "start": 16,
+          "end": 26,
+          "type": "DOB",
+          "gdprTier": "HIGH",
+          "text": "2026-05-11"
+        },
+        {
+          "start": 128,
+          "end": 138,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "PRB0040288"
+        },
+        {
+          "start": 113,
+          "end": 123,
+          "type": "ID",
+          "gdprTier": "LOW",
+          "text": "INC0000845"
+        },
+        {
+          "start": 86,
+          "end": 100,
+          "type": "PHONE",
+          "gdprTier": "MED",
+          "text": "+49 89 9876543"
+        },
+        {
+          "start": 65,
+          "end": 78,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "Julia Fischer"
+        },
+        {
+          "start": 0,
+          "end": 14,
+          "type": "PERSON",
+          "gdprTier": "MED",
+          "text": "sys_created_on"
+        }
+      ]
+    }
+  ]
+}

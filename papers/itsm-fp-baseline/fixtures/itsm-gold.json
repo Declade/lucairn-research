@@ -1,0 +1,191 @@
+[
+  {
+    "id": "itsm-001-timestamp-fp",
+    "language": "en",
+    "text": "Incident INC0000059 was created on sys_created_on: 2026-06-05 09:26:14 by admin. The record was last updated 2026-06-05 09:41:02. Assigned to the Network team queue.",
+    "goldEntities": [
+      {
+        "start": 9,
+        "end": 19,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-002-ticket-prefix-person-fp",
+    "language": "en",
+    "text": "State changed from New to In Progress. Ticket INC0000112 is currently In Progress and assigned to the Service Desk.",
+    "goldEntities": [
+      {
+        "start": 46,
+        "end": 56,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-003-sys-id-fp",
+    "language": "en",
+    "text": "sys_id: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 references caller_id: 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c for problem PRB0040233.",
+    "goldEntities": [
+      {
+        "start": 108,
+        "end": 118,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-004-field-name-fp",
+    "language": "en",
+    "text": "The field sys_created_on must not be confused with a person's name. opened_by and closed_by are system audit columns, not PERSON entities.",
+    "goldEntities": []
+  },
+  {
+    "id": "itsm-005-md-url-fp",
+    "language": "en",
+    "text": "See the runbook at docs/incident-response.md for escalation steps. Also check README.md and CHANGELOG.md before closing INC0000287.",
+    "goldEntities": [
+      {
+        "start": 120,
+        "end": 130,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-006-iso-date-no-context-fp",
+    "language": "en",
+    "text": "Maintenance window scheduled for 2026-08-14. Please close INC0000391 after verification on 2026-08-15.",
+    "goldEntities": [
+      {
+        "start": 58,
+        "end": 68,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-007-real-pii-name-email-phone",
+    "language": "en",
+    "text": "Caller Erika Schmidt (erika.schmidt@example.com, +49 30 1234567) reported that her laptop will not boot. Ticket INC0000512 assigned to Hardware team.",
+    "goldEntities": [
+      {
+        "start": 7,
+        "end": 20,
+        "type": "PERSON",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 22,
+        "end": 47,
+        "type": "EMAIL",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 49,
+        "end": 63,
+        "type": "PHONE",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 112,
+        "end": 122,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-008-real-pii-dob-with-birth-context",
+    "language": "en",
+    "text": "Employee record update for Markus Weber, date of birth 14.03.1985, requested via ticket INC0000633. HR verified identity against national ID before processing.",
+    "goldEntities": [
+      {
+        "start": 27,
+        "end": 39,
+        "type": "PERSON",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 55,
+        "end": 65,
+        "type": "DOB",
+        "gdprTier": "HIGH"
+      },
+      {
+        "start": 88,
+        "end": 98,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-009-real-pii-iban",
+    "language": "en",
+    "text": "Refund request from Anna Klein (anna.klein@example.com) requires IBAN DE89370400440532013000 for the reimbursement tied to INC0000701.",
+    "goldEntities": [
+      {
+        "start": 20,
+        "end": 30,
+        "type": "PERSON",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 32,
+        "end": 54,
+        "type": "EMAIL",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 70,
+        "end": 92,
+        "type": "IBAN",
+        "gdprTier": "HIGH"
+      },
+      {
+        "start": 123,
+        "end": 133,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  },
+  {
+    "id": "itsm-010-mixed-record",
+    "language": "en",
+    "text": "sys_created_on: 2026-05-11 08:03:00. State: In Progress. Caller: Julia Fischer, phone +49 89 9876543. Related to INC0000845 and PRB0040288. Notes updated 2026-05-11.",
+    "goldEntities": [
+      {
+        "start": 65,
+        "end": 78,
+        "type": "PERSON",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 86,
+        "end": 100,
+        "type": "PHONE",
+        "gdprTier": "MED"
+      },
+      {
+        "start": 113,
+        "end": 123,
+        "type": "ID",
+        "gdprTier": "LOW"
+      },
+      {
+        "start": 128,
+        "end": 138,
+        "type": "ID",
+        "gdprTier": "LOW"
+      }
+    ]
+  }
+]
