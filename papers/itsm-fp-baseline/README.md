@@ -77,11 +77,16 @@ python3 -m spacy download en_core_web_md
 python3 -m spacy download de_core_news_sm   # needed because supported_languages: [de, en]
 
 # 2. Run the sanitizer probe (adjust --fixtures/--output paths as needed;
-#    the script's DSA path is hardcoded to /Users/marcschuelke/dual-sandbox-architecture,
-#    edit SANITIZER_DIR/CONFIG_DIR at the top of the script for another clone).
+#    point --sanitizer-dir/--config-dir, or DSA_SANITIZER_DIR/DSA_CONFIG_DIR,
+#    at your dual-sandbox-architecture clone -- read-only, never written to).
 python3 scripts/run-sanitizer-probe.py \
   --fixtures papers/itsm-fp-baseline/fixtures/itsm-gold.json \
-  --output papers/itsm-fp-baseline/raw-results/RUN-predictions.json
+  --output papers/itsm-fp-baseline/raw-results/RUN-predictions.json \
+  --sanitizer-dir "$DSA_ROOT/services/sanitizer" \
+  --config-dir "$DSA_ROOT/config"
+
+# (Alternatively, export DSA_SANITIZER_DIR and DSA_CONFIG_DIR instead of
+# passing the flags.)
 
 # 3. Score with the real REDACT harness scorer.
 node --import tsx scripts/run-itsm-baseline.ts \

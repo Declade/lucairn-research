@@ -4,8 +4,8 @@
   "bracket": "S5-BASELINE (pre-Slice-3, current L1+L2 sanitizer code)",
   "prd": "Opus Advisor/specs/prd-2026-07-04-redaction-quality-overhaul.md",
   "probe_meta": {
-    "sanitizer_source": "/Users/marcschuelke/dual-sandbox-architecture/services/sanitizer",
-    "config_source": "/Users/marcschuelke/dual-sandbox-architecture/config/default-sanitizer.yaml",
+    "sanitizer_source": "$DSA_SANITIZER_DIR",
+    "config_source": "$DSA_CONFIG_DIR/default-sanitizer.yaml",
     "presidio_confidence_threshold": 0.35,
     "custom_recognizer_count": 42,
     "l1_identity_fields_seeded": 0,

@@ -28,11 +28,38 @@ Output: PredictedRecord[] JSON (schema.ts) written to stdout or --output.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-SANITIZER_DIR = Path("/Users/marcschuelke/dual-sandbox-architecture/services/sanitizer")
-CONFIG_DIR = Path("/Users/marcschuelke/dual-sandbox-architecture/config")
+
+def _resolve_dir(cli_value: str | None, env_var: str, label: str) -> Path:
+    """Resolve a required directory from --flag > env var, with no default
+    that would bake in a personal path. Fails loudly if neither is set."""
+    raw = cli_value or os.environ.get(env_var)
+    if not raw:
+        sys.exit(
+            f"error: {label} not set. Pass --{label.lower().replace('_', '-')} "
+            f"or set the {env_var} environment variable to the path of your "
+            f"dual-sandbox-architecture clone's {label} (read-only; never written to)."
+        )
+    return Path(raw)
+
+
+def _parse_known_args() -> argparse.Namespace:
+    """Parse just the two dir-resolution flags early, before the rest of
+    argparse setup, since SANITIZER_DIR must be on sys.path before the
+    sanitizer-module imports below can succeed."""
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--sanitizer-dir")
+    ap.add_argument("--config-dir")
+    known, _ = ap.parse_known_args()
+    return known
+
+
+_early_args = _parse_known_args()
+SANITIZER_DIR = _resolve_dir(_early_args.sanitizer_dir, "DSA_SANITIZER_DIR", "SANITIZER_DIR")
+CONFIG_DIR = _resolve_dir(_early_args.config_dir, "DSA_CONFIG_DIR", "CONFIG_DIR")
 
 sys.path.insert(0, str(SANITIZER_DIR))
 
@@ -161,6 +188,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixtures", required=True)
     ap.add_argument("--output", required=True)
+    ap.add_argument(
+        "--sanitizer-dir",
+        help="Path to dual-sandbox-architecture/services/sanitizer "
+        "(or set DSA_SANITIZER_DIR). Read-only; never written to.",
+    )
+    ap.add_argument(
+        "--config-dir",
+        help="Path to dual-sandbox-architecture/config (or set DSA_CONFIG_DIR). "
+        "Read-only; never written to.",
+    )
     args = ap.parse_args()
 
     with open(args.fixtures) as f:
