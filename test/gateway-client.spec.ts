@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -622,6 +622,22 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
   it('preserves rows 1..N-1 on SIGTERM mid-run with no partial-line tail', async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'slice25-sigterm-'));
     const outputPath = join(tmpDir, 'run.ndjson');
+    const truthPath = join(tmpDir, 'truth.jsonl');
+    const subsetPath = join(tmpDir, 'subset.csv');
+    // Keep the fixture deliberately small and self-contained: the pipeline
+    // needs only matching row indices, a transcription column, and valid
+    // ground-truth records for this mock durability check.
+    const target = Array.from({ length: 20 }, (_, index) => index + 1);
+    writeFileSync(
+      truthPath,
+      `${target.map((rowIndex) => JSON.stringify({ row_index: rowIndex, entities: [] })).join('\n')}\n`,
+    );
+    writeFileSync(
+      subsetPath,
+      `original_row_index,transcription\n${target
+        .map((rowIndex) => `${rowIndex},synthetic row ${rowIndex}`)
+        .join('\n')}\n`,
+    );
     try {
       const proc = spawn(
         'node',
@@ -631,6 +647,8 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
           'scripts/run-pipeline.ts',
           '--rows=20',
           '--mock',
+          `--truth=${truthPath}`,
+          `--subset=${subsetPath}`,
           // 30 rpm = 2000 ms spacing → predictable timing for the
           // mid-run kill at ~2.5 s elapsed. With 30 rpm spacing, rows
           // 1+2 dispatch at t=0 + t=2s, then SIGTERM at t=2.5s drops
@@ -638,15 +656,56 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
           '--rate-limit-rpm=30',
           `--output=${outputPath}`,
         ],
-        { cwd: process.cwd(), stdio: 'ignore' },
+        { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] },
       );
+      let stderr = '';
+      proc.stderr?.setEncoding('utf8');
+      proc.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+      });
+      const exitPromise = new Promise<{
+        kind: 'exit';
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve) => {
+        proc.once('exit', (code, signal) => resolve({ kind: 'exit', code, signal }));
+      });
+      const errorPromise = new Promise<{ kind: 'error'; error: Error }>((resolve) => {
+        proc.once('error', (error) => resolve({ kind: 'error', error }));
+      });
+      const closePromise = new Promise<void>((resolve) => {
+        proc.once('close', () => resolve());
+      });
       // Give the harness time to dispatch at least 1 row (rate-limit
       // 30 rpm = 2000 ms per row gap), then SIGTERM.
-      await new Promise<void>((res) => setTimeout(res, 2500));
-      proc.kill('SIGTERM');
-      await new Promise<void>((res) => {
-        proc.once('exit', () => res());
+      let preSignalTimer: NodeJS.Timeout | undefined;
+      const preSignalDelay = new Promise<null>((resolve) => {
+        preSignalTimer = setTimeout(() => resolve(null), 2500);
       });
+      const preSignalResult = await Promise.race([
+        exitPromise,
+        errorPromise,
+        preSignalDelay,
+      ]);
+      if (preSignalTimer !== undefined) clearTimeout(preSignalTimer);
+      if (preSignalResult !== null) {
+        await closePromise;
+        if (preSignalResult.kind === 'error') {
+          throw new Error(
+            `run-pipeline child error before SIGTERM: ${preSignalResult.error.message}; stderr: ${stderr || '<empty>'}`,
+          );
+        }
+        throw new Error(
+          `run-pipeline exited before SIGTERM (code=${String(preSignalResult.code)}, signal=${String(preSignalResult.signal)}); stderr: ${stderr || '<empty>'}`,
+        );
+      }
+      expect(proc.exitCode).toBeNull();
+      expect(proc.signalCode).toBeNull();
+      const signalSent = proc.kill('SIGTERM');
+      expect(signalSent).toBe(true);
+      const exit = await exitPromise;
+      await closePromise;
+      expect(exit.signal).toBe('SIGTERM');
       expect(existsSync(outputPath)).toBe(true);
       const fileText = readFileSync(outputPath, 'utf8');
       // (b) No partial-line tail. The fsync(2)-after-each-write invariant
@@ -680,12 +739,8 @@ describe('run-pipeline streaming NDJSON writer (M1)', () => {
       //     The harness sorts indices ascending then takes first --rows=N
       //     (see scripts/run-pipeline.ts: `indices.sort((a, b) => a - b)`
       //     + `indices.slice(0, limit)`). The first 20 sorted indices of
-      //     `datasets/healthcare/with-injected-pii/ground-truth.jsonl`
-      //     are the fixture below — recompute via
-      //     `head ground-truth.jsonl | jq .row_index | sort -n | head -20`
-      //     if the dataset is ever regenerated. Locked here so this
+      //     synthetic fixture's 1..20 target. Locked here so this
       //     load-bearing test never silently passes by luck.
-      const target = [18, 19, 41, 47, 78, 80, 100, 110, 136, 146, 158, 161, 164, 166, 174, 187, 206, 213, 218, 229];
       const observedRowIndices = records.map((r) => r['row_index']);
       expect(observedRowIndices).toEqual(target.slice(0, records.length));
     } finally {
