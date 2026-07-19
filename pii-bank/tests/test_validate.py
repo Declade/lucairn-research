@@ -1,0 +1,423 @@
+"""Pytest coverage for pii-bank/validate.py.
+
+Covers: a valid row passes clean; each FAIL class fires (bad enum,
+train+measured-provenance, public-repo+dogfood-provenance, span out-of-bounds,
+family-split inconsistency, manifest hash mismatch via a temp file); and the
+contamination check fires on a real overlap and stays clean without one.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+PII_BANK_DIR = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("validate", PII_BANK_DIR / "validate.py")
+validate = importlib.util.module_from_spec(spec)
+sys.modules["validate"] = validate
+spec.loader.exec_module(validate)  # type: ignore[union-attr]
+
+
+def make_valid_row(**overrides) -> dict:
+    row = {
+        "id": "test-row-001",
+        "text": "John Smith lives in Berlin.",
+        "lang": "en",
+        "zone": "prose",
+        "spans": [
+            {"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT"},
+            {"start": 21, "end": 27, "category": "LOCATION", "expected": "REDACT"},
+        ],
+        "org_id": None,
+        "provenance": "synthetic-generated",
+        "consent_basis": "synthetic",
+        "split": "train",
+        "family_id": "test-family-001",
+        "source": "unit test",
+        "created": "2026-07-19",
+    }
+    row.update(overrides)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# validate_row
+# ---------------------------------------------------------------------------
+
+
+class TestValidRow:
+    def test_valid_row_passes_clean(self):
+        row = make_valid_row()
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert fails == [], f"expected zero failures, got: {[str(f) for f in fails]}"
+
+    def test_valid_row_with_empty_spans_passes(self):
+        row = make_valid_row(text="No PII here at all.", spans=[])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert fails == []
+
+    def test_valid_row_with_null_org_id_passes(self):
+        row = make_valid_row(org_id=None)
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert fails == []
+
+    def test_valid_row_with_string_org_id_passes(self):
+        row = make_valid_row(org_id="acme-corp")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert fails == []
+
+
+class TestBadEnum:
+    def test_bad_lang_fails(self):
+        row = make_valid_row(lang="fr")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("lang" in str(f) for f in fails)
+
+    def test_bad_zone_fails(self):
+        row = make_valid_row(zone="not_a_real_zone")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("zone" in str(f) for f in fails)
+
+    def test_bad_provenance_fails(self):
+        row = make_valid_row(provenance="scraped-from-nowhere")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("provenance" in str(f) for f in fails)
+
+    def test_bad_consent_basis_fails(self):
+        row = make_valid_row(consent_basis="implied")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("consent_basis" in str(f) for f in fails)
+
+    def test_bad_split_fails(self):
+        row = make_valid_row(split="validation")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("split" in str(f) for f in fails)
+
+    def test_bad_span_expected_fails(self):
+        row = make_valid_row(spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "MAYBE"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("expected" in str(f) for f in fails)
+
+    def test_unknown_field_fails(self):
+        row = make_valid_row()
+        row["unexpected_extra_field"] = "surprise"
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("unknown field" in str(f) for f in fails)
+
+    def test_missing_field_fails(self):
+        row = make_valid_row()
+        del row["consent_basis"]
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("missing required field" in str(f) for f in fails)
+
+    def test_bad_created_format_fails(self):
+        row = make_valid_row(created="07/19/2026")
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("created" in str(f) for f in fails)
+
+
+class TestSpanOutOfBounds:
+    def test_span_end_past_text_length_fails(self):
+        row = make_valid_row(text="short", spans=[{"start": 0, "end": 999, "category": "PERSON", "expected": "REDACT"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("out of bounds" in str(f) for f in fails)
+
+    def test_span_start_past_text_length_fails(self):
+        row = make_valid_row(text="short", spans=[{"start": 999, "end": 1000, "category": "PERSON", "expected": "REDACT"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("out of bounds" in str(f) for f in fails)
+
+    def test_negative_span_offset_fails(self):
+        row = make_valid_row(text="short", spans=[{"start": -1, "end": 3, "category": "PERSON", "expected": "REDACT"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("negative offset" in str(f) for f in fails)
+
+    def test_end_before_start_fails(self):
+        row = make_valid_row(text="short text", spans=[{"start": 5, "end": 2, "category": "PERSON", "expected": "REDACT"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("end < start" in str(f) for f in fails)
+
+    def test_span_not_a_dict_fails(self):
+        row = make_valid_row(spans=["not-a-span-object"])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("span is not an object" in str(f) for f in fails)
+
+    def test_span_missing_field_fails(self):
+        row = make_valid_row(spans=[{"start": 0, "end": 4, "category": "PERSON"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("missing span field" in str(f) for f in fails)
+
+    def test_span_unknown_field_fails(self):
+        row = make_valid_row(
+            spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "REDACT", "confidence": 0.9}]
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("unknown span field" in str(f) for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# enforce_quarantine
+# ---------------------------------------------------------------------------
+
+
+class TestQuarantineTrainMeasured:
+    def test_train_split_with_measured_provenance_fails(self):
+        row = make_valid_row(split="train", provenance="measured-live")
+        fails = validate.enforce_quarantine([(row, 1, "test.jsonl")])
+        assert any("quarantine violation" in str(f) and "requires provenance" in str(f) for f in fails)
+
+    def test_dev_split_with_dogfood_provenance_fails(self):
+        row = make_valid_row(split="dev", provenance="dogfood")
+        fails = validate.enforce_quarantine([(row, 1, "test.jsonl")])
+        assert any("quarantine violation" in str(f) and "requires provenance" in str(f) for f in fails)
+
+    def test_train_split_with_synthetic_provenance_passes(self):
+        row = make_valid_row(split="train", provenance="synthetic-generated")
+        fails = validate.enforce_quarantine([(row, 1, "test.jsonl")])
+        assert fails == []
+
+    def test_eval_only_split_with_measured_provenance_passes_rule1(self):
+        # Rule 1 only restricts train/dev; eval-only + measured-live is fine for rule 1
+        # (rule 2, the in-repo-provenance ban, is a SEPARATE check tested below).
+        row = make_valid_row(split="eval-only", provenance="measured-live", family_id="fam-eval-1")
+        fails = validate.enforce_quarantine([(row, 1, "test.jsonl")])
+        rule1_fails = [f for f in fails if "requires provenance" in str(f)]
+        assert rule1_fails == []
+
+
+class TestQuarantinePublicDogfood:
+    def test_public_repo_row_with_dogfood_provenance_fails(self):
+        row = make_valid_row(split="eval-only", provenance="dogfood", family_id="fam-dogfood-1")
+        fails = validate.enforce_quarantine([(row, 1, "rows/synthetic-seed.jsonl")])
+        assert any("forbidden inside the public repo" in str(f) for f in fails)
+
+    def test_public_repo_row_with_measured_live_provenance_fails(self):
+        row = make_valid_row(split="eval-only", provenance="measured-live", family_id="fam-measured-1")
+        fails = validate.enforce_quarantine([(row, 1, "rows/synthetic-seed.jsonl")])
+        assert any("forbidden inside the public repo" in str(f) for f in fails)
+
+    def test_public_repo_row_with_synthetic_provenance_passes(self):
+        row = make_valid_row(provenance="synthetic-generated")
+        fails = validate.enforce_quarantine([(row, 1, "rows/synthetic-seed.jsonl")])
+        assert fails == []
+
+
+class TestFamilySplitConsistency:
+    def test_family_split_across_two_splits_fails(self):
+        row_a = make_valid_row(id="a", family_id="shared-family", split="train", provenance="synthetic-generated")
+        row_b = make_valid_row(id="b", family_id="shared-family", split="eval-only", provenance="measured-live")
+        fails = validate.enforce_quarantine([(row_a, 1, "test.jsonl"), (row_b, 2, "test.jsonl")])
+        assert any("spans multiple splits" in str(f) for f in fails)
+
+    def test_family_same_split_passes(self):
+        row_a = make_valid_row(id="a", family_id="shared-family", split="train", provenance="synthetic-generated")
+        row_b = make_valid_row(id="b", family_id="shared-family", split="train", provenance="synthetic-generated")
+        fails = validate.enforce_quarantine([(row_a, 1, "test.jsonl"), (row_b, 2, "test.jsonl")])
+        family_fails = [f for f in fails if "spans multiple splits" in str(f)]
+        assert family_fails == []
+
+
+# ---------------------------------------------------------------------------
+# check_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestManifestMismatch:
+    def test_manifest_hash_mismatch_fails(self, tmp_path, monkeypatch):
+        asset = tmp_path / "asset.jsonl"
+        asset.write_text('{"text": "hello world"}\n', encoding="utf-8")
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(asset),
+                    "sha256": "0" * 64,  # deliberately wrong
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+        fails, warns = validate.check_manifest()
+        assert any("sha256 mismatch" in str(f) for f in fails)
+
+    def test_manifest_hash_match_passes(self, tmp_path, monkeypatch):
+        asset = tmp_path / "asset.jsonl"
+        content = '{"text": "hello world"}\n'
+        asset.write_text(content, encoding="utf-8")
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(asset),
+                    "sha256": actual_hash,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+        fails, warns = validate.check_manifest()
+        assert fails == []
+
+    def test_manifest_missing_local_file_warns_not_fails(self, tmp_path, monkeypatch):
+        missing_asset = tmp_path / "does-not-exist.jsonl"
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(missing_asset),
+                    "sha256": "a" * 64,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture -- deliberately missing",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+        fails, warns = validate.check_manifest()
+        assert fails == []
+        assert any("skipping hash check" in str(w) for w in warns)
+
+    def test_manifest_missing_file_entirely_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validate, "MANIFEST_PATH", tmp_path / "no-manifest-here.json")
+        fails, warns = validate.check_manifest()
+        assert any("not found" in str(f) for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# contamination
+# ---------------------------------------------------------------------------
+
+
+class TestContamination:
+    def test_overlapping_8gram_fails(self, tmp_path, monkeypatch):
+        shared_sentence = "the quick brown fox jumps over the lazy dog today"
+        eval_asset = tmp_path / "eval.jsonl"
+        eval_asset.write_text(json.dumps({"text": shared_sentence}) + "\n", encoding="utf-8")
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(eval_asset),
+                    "sha256": "irrelevant-for-this-test",
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+
+        train_row = make_valid_row(id="contaminated-row", split="train", text=shared_sentence)
+        fails = validate.run_contamination_check([(train_row, 1, "test.jsonl")])
+        assert any("shares" in str(f) and "8-gram" in str(f) for f in fails)
+
+    def test_no_overlap_passes(self, tmp_path, monkeypatch):
+        eval_asset = tmp_path / "eval.jsonl"
+        eval_asset.write_text(
+            json.dumps({"text": "completely unrelated content about penguins in antarctica exploring ice"}) + "\n",
+            encoding="utf-8",
+        )
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(eval_asset),
+                    "sha256": "irrelevant-for-this-test",
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+
+        train_row = make_valid_row(
+            id="clean-row", split="train", text="A totally different sentence about mountain biking trails nearby."
+        )
+        fails = validate.run_contamination_check([(train_row, 1, "test.jsonl")])
+        assert fails == []
+
+    def test_eval_only_rows_are_not_scanned_against_themselves(self, tmp_path, monkeypatch):
+        # contamination check only flags train/dev rows; eval-only rows must
+        # be free to share text with the eval assets they came from.
+        shared_sentence = "the quick brown fox jumps over the lazy dog today"
+        eval_asset = tmp_path / "eval.jsonl"
+        eval_asset.write_text(json.dumps({"text": shared_sentence}) + "\n", encoding="utf-8")
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(eval_asset),
+                    "sha256": "irrelevant-for-this-test",
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "test fixture",
+                }
+            ]
+        }
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+
+        eval_row = make_valid_row(
+            id="eval-row", split="eval-only", provenance="eval-import", text=shared_sentence
+        )
+        fails = validate.run_contamination_check([(eval_row, 1, "test.jsonl")])
+        assert fails == []
+
+
+# ---------------------------------------------------------------------------
+# end-to-end main() smoke tests
+# ---------------------------------------------------------------------------
+
+
+class TestMainEndToEnd:
+    def _write_bank(self, tmp_path: Path, rows: list[dict], manifest_entries: list[dict] | None = None):
+        bank_dir = tmp_path / "pii-bank"
+        rows_dir = bank_dir / "rows"
+        rows_dir.mkdir(parents=True)
+        with open(rows_dir / "test.jsonl", "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+        manifest = {"entries": manifest_entries or []}
+        with open(bank_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        return bank_dir
+
+    def test_main_exits_zero_on_clean_bank(self, tmp_path, monkeypatch):
+        bank_dir = self._write_bank(tmp_path, [make_valid_row()])
+        monkeypatch.setattr(validate, "ROWS_DIR", bank_dir / "rows")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", bank_dir / "manifest.json")
+        exit_code = validate.main([])
+        assert exit_code == 0
+
+    def test_main_exits_one_on_bad_row(self, tmp_path, monkeypatch, capsys):
+        bad_row = make_valid_row(lang="fr")
+        bank_dir = self._write_bank(tmp_path, [bad_row])
+        monkeypatch.setattr(validate, "ROWS_DIR", bank_dir / "rows")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", bank_dir / "manifest.json")
+        exit_code = validate.main([])
+        assert exit_code == 1

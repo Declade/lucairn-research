@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""Validation CLI for the pii-bank labeled-data bank.
+
+Stdlib-only (no new deps). Implements:
+
+  (a) schema validation of every rows/*.jsonl row
+  (b) quarantine enforcement (train/dev must be synthetic-generated;
+      in-repo rows must never be measured-live/dogfood; family_id rows
+      must all share one split)
+  (c) --check-manifest: recompute sha256 for 'local' manifest entries
+      (WARN + skip if missing, FAIL on hash mismatch), verify 'repo' entries
+      exist and match
+  (d) --contamination: normalized 8-gram overlap check between every
+      train/dev row and every readable eval-only asset referenced in the
+      manifest
+
+Exit code 0 on a fully clean run, 1 if any FAIL was recorded.
+
+See README.md for the row schema and manifest.json for the eval-quarantine
+manifest. Governing PRD: prd-2026-07-19-pii-data-bank-finetune-pilot.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+ROWS_DIR = HERE / "rows"
+MANIFEST_PATH = HERE / "manifest.json"
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+REQUIRED_FIELDS = {
+    "id",
+    "text",
+    "lang",
+    "zone",
+    "spans",
+    "org_id",
+    "provenance",
+    "consent_basis",
+    "split",
+    "family_id",
+    "source",
+    "created",
+}
+
+ALLOWED_LANG = {"en", "de"}
+ALLOWED_ZONE = {
+    "prose",
+    "json_value",
+    "json_key",
+    "schema_label",
+    "technical_id",
+    "url",
+    "code_identifier",
+    "comment",
+    "string_literal",
+}
+ALLOWED_PROVENANCE = {"synthetic-generated", "measured-live", "dogfood", "eval-import"}
+ALLOWED_CONSENT_BASIS = {"synthetic", "own-data", "contracted", "public-corpus"}
+ALLOWED_SPLIT = {"train", "dev", "eval-only"}
+ALLOWED_SPAN_EXPECTED = {"REDACT", "KEEP"}
+ALLOWED_SPAN_FIELDS = {"start", "end", "category", "expected"}
+
+CREATED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# provenance values that may NEVER appear inside this (public) repo's rows/
+FORBIDDEN_IN_REPO_PROVENANCE = {"measured-live", "dogfood"}
+# provenance values allowed to carry split in {train, dev}
+SYNTHETIC_PROVENANCE = "synthetic-generated"
+
+
+class Failure:
+    __slots__ = ("scope", "message")
+
+    def __init__(self, scope: str, message: str) -> None:
+        self.scope = scope
+        self.message = message
+
+    def __str__(self) -> str:
+        return f"FAIL [{self.scope}] {self.message}"
+
+
+class Warning_:
+    __slots__ = ("scope", "message")
+
+    def __init__(self, scope: str, message: str) -> None:
+        self.scope = scope
+        self.message = message
+
+    def __str__(self) -> str:
+        return f"WARN [{self.scope}] {self.message}"
+
+
+def load_rows_files() -> list[Path]:
+    if not ROWS_DIR.is_dir():
+        return []
+    return sorted(ROWS_DIR.glob("*.jsonl"))
+
+
+def parse_jsonl(path: Path) -> list[tuple[int, dict[str, Any] | None, str | None]]:
+    """Return list of (line_no, obj_or_None, parse_error_or_None)."""
+    out: list[tuple[int, dict[str, Any] | None, str | None]] = []
+    text = path.read_text(encoding="utf-8")
+    for i, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            out.append((i, None, str(exc)))
+            continue
+        out.append((i, obj, None))
+    return out
+
+
+def validate_span(row_id: str, text_len: int, span: Any, idx: int) -> list[Failure]:
+    fails: list[Failure] = []
+    scope = f"row={row_id} span[{idx}]"
+    if not isinstance(span, dict):
+        fails.append(Failure(scope, f"span is not an object: {span!r}"))
+        return fails
+    unknown = set(span.keys()) - ALLOWED_SPAN_FIELDS
+    if unknown:
+        fails.append(Failure(scope, f"unknown span field(s): {sorted(unknown)}"))
+    missing = ALLOWED_SPAN_FIELDS - set(span.keys())
+    if missing:
+        fails.append(Failure(scope, f"missing span field(s): {sorted(missing)}"))
+        return fails
+    start, end = span.get("start"), span.get("end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        fails.append(Failure(scope, f"start/end must be int, got start={start!r} end={end!r}"))
+    else:
+        if start < 0 or end < 0:
+            fails.append(Failure(scope, f"negative offset: start={start} end={end}"))
+        if end < start:
+            fails.append(Failure(scope, f"end < start: start={start} end={end}"))
+        if start > text_len or end > text_len:
+            fails.append(
+                Failure(
+                    scope,
+                    f"span out of bounds: start={start} end={end} text_len={text_len}",
+                )
+            )
+    if not isinstance(span.get("category"), str) or not span.get("category"):
+        fails.append(Failure(scope, f"category must be a non-empty string, got {span.get('category')!r}"))
+    if span.get("expected") not in ALLOWED_SPAN_EXPECTED:
+        fails.append(
+            Failure(
+                scope,
+                f"expected must be one of {sorted(ALLOWED_SPAN_EXPECTED)}, got {span.get('expected')!r}",
+            )
+        )
+    return fails
+
+
+def validate_row(row: dict[str, Any], line_no: int, source_file: str) -> list[Failure]:
+    fails: list[Failure] = []
+    scope_base = f"{source_file}:{line_no}"
+
+    if not isinstance(row, dict):
+        return [Failure(scope_base, f"row is not a JSON object: {type(row)}")]
+
+    row_id = row.get("id") if isinstance(row.get("id"), str) else f"<no-id at {scope_base}>"
+    scope = f"{scope_base} id={row_id}"
+
+    # Unknown fields
+    unknown = set(row.keys()) - REQUIRED_FIELDS
+    if unknown:
+        fails.append(Failure(scope, f"unknown field(s): {sorted(unknown)}"))
+
+    # Missing fields
+    missing = REQUIRED_FIELDS - set(row.keys())
+    if missing:
+        fails.append(Failure(scope, f"missing required field(s): {sorted(missing)}"))
+        # Can't safely continue span/text checks without these -- bail early.
+        return fails
+
+    # id
+    if not isinstance(row["id"], str) or not row["id"]:
+        fails.append(Failure(scope, f"id must be a non-empty string, got {row['id']!r}"))
+
+    # text
+    if not isinstance(row["text"], str):
+        fails.append(Failure(scope, f"text must be a string, got {type(row['text'])}"))
+        text_len = 0
+    else:
+        text_len = len(row["text"].encode("utf-8"))
+
+    # lang
+    if row["lang"] not in ALLOWED_LANG:
+        fails.append(Failure(scope, f"lang must be one of {sorted(ALLOWED_LANG)}, got {row['lang']!r}"))
+
+    # zone
+    if row["zone"] not in ALLOWED_ZONE:
+        fails.append(Failure(scope, f"zone must be one of {sorted(ALLOWED_ZONE)}, got {row['zone']!r}"))
+
+    # spans
+    spans = row["spans"]
+    if not isinstance(spans, list):
+        fails.append(Failure(scope, f"spans must be a list, got {type(spans)}"))
+    else:
+        for idx, span in enumerate(spans):
+            fails.extend(validate_span(row_id, text_len, span, idx))
+
+    # org_id
+    if row["org_id"] is not None and not isinstance(row["org_id"], str):
+        fails.append(Failure(scope, f"org_id must be string or null, got {row['org_id']!r}"))
+
+    # provenance
+    if row["provenance"] not in ALLOWED_PROVENANCE:
+        fails.append(
+            Failure(scope, f"provenance must be one of {sorted(ALLOWED_PROVENANCE)}, got {row['provenance']!r}")
+        )
+
+    # consent_basis
+    if row["consent_basis"] not in ALLOWED_CONSENT_BASIS:
+        fails.append(
+            Failure(
+                scope,
+                f"consent_basis must be one of {sorted(ALLOWED_CONSENT_BASIS)}, got {row['consent_basis']!r}",
+            )
+        )
+
+    # split
+    if row["split"] not in ALLOWED_SPLIT:
+        fails.append(Failure(scope, f"split must be one of {sorted(ALLOWED_SPLIT)}, got {row['split']!r}"))
+
+    # family_id
+    if not isinstance(row["family_id"], str) or not row["family_id"]:
+        fails.append(Failure(scope, f"family_id must be a non-empty string, got {row['family_id']!r}"))
+
+    # source
+    if not isinstance(row["source"], str) or not row["source"]:
+        fails.append(Failure(scope, f"source must be a non-empty string, got {row['source']!r}"))
+
+    # created
+    if not isinstance(row["created"], str) or not CREATED_RE.match(row["created"]):
+        fails.append(Failure(scope, f"created must be YYYY-MM-DD, got {row['created']!r}"))
+
+    return fails
+
+
+def enforce_quarantine(
+    rows: list[tuple[dict[str, Any], int, str]],
+) -> list[Failure]:
+    """rows: list of (row_obj, line_no, source_file) -- already schema-clean enough
+    to have provenance/split/family_id present, but we re-check defensively."""
+    fails: list[Failure] = []
+    family_splits: dict[str, set[str]] = {}
+    family_first_seen: dict[str, str] = {}
+
+    for row, line_no, source_file in rows:
+        scope = f"{source_file}:{line_no} id={row.get('id', '<no-id>')}"
+        provenance = row.get("provenance")
+        split = row.get("split")
+        family_id = row.get("family_id")
+
+        # Rule 1: train/dev must be synthetic-generated
+        if split in {"train", "dev"} and provenance != SYNTHETIC_PROVENANCE:
+            fails.append(
+                Failure(
+                    scope,
+                    f"quarantine violation: split={split!r} requires provenance="
+                    f"{SYNTHETIC_PROVENANCE!r}, got provenance={provenance!r}",
+                )
+            )
+
+        # Rule 2: in-repo rows/ must never carry measured-live/dogfood provenance.
+        # ROWS_DIR is inside this (public) repo by construction -- every file
+        # this function is called on for 'rows' data lives under rows/.
+        if provenance in FORBIDDEN_IN_REPO_PROVENANCE:
+            fails.append(
+                Failure(
+                    scope,
+                    f"quarantine violation: provenance={provenance!r} is forbidden inside "
+                    f"the public repo's rows/ directory (public repo = synthetic/tooling only)",
+                )
+            )
+
+        # Rule 3: family-split consistency
+        if isinstance(family_id, str) and family_id:
+            seen = family_splits.setdefault(family_id, set())
+            if isinstance(split, str):
+                seen.add(split)
+            family_first_seen.setdefault(family_id, scope)
+
+    for family_id, splits in family_splits.items():
+        if len(splits) > 1:
+            fails.append(
+                Failure(
+                    f"family_id={family_id}",
+                    f"quarantine violation: family_id {family_id!r} spans multiple splits "
+                    f"{sorted(splits)} (first seen at {family_first_seen[family_id]}) -- "
+                    f"all rows sharing a family_id must share one split",
+                )
+            )
+
+    return fails
+
+
+# ---------------------------------------------------------------------------
+# --check-manifest
+# ---------------------------------------------------------------------------
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def check_manifest() -> tuple[list[Failure], list[Warning_]]:
+    fails: list[Failure] = []
+    warns: list[Warning_] = []
+
+    if not MANIFEST_PATH.is_file():
+        fails.append(Failure("manifest", f"manifest.json not found at {MANIFEST_PATH}"))
+        return fails, warns
+
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fails.append(Failure("manifest", f"manifest.json is not valid JSON: {exc}"))
+        return fails, warns
+
+    entries = manifest.get("entries", [])
+    if not isinstance(entries, list):
+        fails.append(Failure("manifest", "manifest.json 'entries' must be a list"))
+        return fails, warns
+
+    for i, entry in enumerate(entries):
+        scope = f"manifest.entries[{i}]"
+        if not isinstance(entry, dict):
+            fails.append(Failure(scope, f"entry is not an object: {entry!r}"))
+            continue
+
+        for field in ("path_or_ref", "sha256", "location_class", "role"):
+            if field not in entry:
+                fails.append(Failure(scope, f"missing field {field!r}"))
+        if any(f not in entry for f in ("path_or_ref", "sha256", "location_class")):
+            continue
+
+        path_or_ref = entry["path_or_ref"]
+        expected_hash = entry["sha256"]
+        location_class = entry["location_class"]
+
+        if location_class == "local":
+            p = Path(path_or_ref)
+            if not p.is_file():
+                warns.append(Warning_(scope, f"local entry missing on disk, skipping hash check: {p}"))
+                continue
+            actual_hash = sha256_of(p)
+            if actual_hash != expected_hash:
+                fails.append(
+                    Failure(
+                        scope,
+                        f"sha256 mismatch for {p}: manifest has {expected_hash}, "
+                        f"actual is {actual_hash}",
+                    )
+                )
+        elif location_class == "dsa-origin-main":
+            # These reference paths inside another repo at a pinned commit.
+            # We only verify them if a local pristine extraction exists at a
+            # sibling 'local' entry with the same hash (cross-checked above);
+            # a bare dsa-origin-main entry with no on-disk local twin is
+            # descriptive-only and not independently re-hashable without
+            # network/repo access, which this stdlib-only tool intentionally
+            # does not perform. Record informational note only.
+            pass
+        elif location_class == "repo":
+            p = HERE / path_or_ref
+            if not p.is_file():
+                fails.append(Failure(scope, f"'repo' entry not found in this repo: {p}"))
+                continue
+            actual_hash = sha256_of(p)
+            if actual_hash != expected_hash:
+                fails.append(
+                    Failure(
+                        scope,
+                        f"sha256 mismatch for {p}: manifest has {expected_hash}, "
+                        f"actual is {actual_hash}",
+                    )
+                )
+        else:
+            fails.append(Failure(scope, f"unknown location_class {location_class!r}"))
+
+    return fails, warns
+
+
+# ---------------------------------------------------------------------------
+# --contamination
+# ---------------------------------------------------------------------------
+
+_WS_RE = re.compile(r"\s+")
+_WORD_RE = re.compile(r"\S+")
+
+
+def normalize_text(text: str) -> str:
+    return _WS_RE.sub(" ", text.strip().lower())
+
+
+def ngrams(text: str, n: int = 8) -> set[str]:
+    tokens = _WORD_RE.findall(normalize_text(text))
+    if len(tokens) < n:
+        return {" ".join(tokens)} if tokens else set()
+    return {" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)}
+
+
+def extract_eval_texts_from_asset(path: Path) -> list[str]:
+    """Best-effort text extraction from a manifest 'local'/'dsa-origin-main'
+    eval asset for contamination scanning. Supports .jsonl (looks for a
+    'text' or 'snippet' field per line) and falls back to raw file content
+    for anything else (e.g. .md, .json blobs)."""
+    texts: list[str] = []
+    if path.suffix == ".jsonl":
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    for key in ("text", "snippet"):
+                        val = obj.get(key)
+                        if isinstance(val, str) and val:
+                            texts.append(val)
+        except OSError:
+            pass
+    else:
+        try:
+            texts.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    return texts
+
+
+def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]]) -> list[Failure]:
+    fails: list[Failure] = []
+
+    if not MANIFEST_PATH.is_file():
+        fails.append(Failure("contamination", "manifest.json not found -- cannot run contamination check"))
+        return fails
+
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fails.append(Failure("contamination", f"manifest.json is not valid JSON: {exc}"))
+        return fails
+
+    eval_ngram_index: dict[str, set[str]] = {}  # asset path_or_ref -> ngrams
+    for entry in manifest.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("location_class") != "local":
+            continue
+        p = Path(entry.get("path_or_ref", ""))
+        if not p.is_file():
+            continue
+        eval_texts = extract_eval_texts_from_asset(p)
+        combined_ngrams: set[str] = set()
+        for t in eval_texts:
+            combined_ngrams |= ngrams(t)
+        if combined_ngrams:
+            eval_ngram_index[str(p)] = combined_ngrams
+
+    for row, line_no, source_file in train_dev_rows:
+        if row.get("split") not in {"train", "dev"}:
+            continue
+        text = row.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        row_ngrams = ngrams(text)
+        if not row_ngrams:
+            continue
+        for asset_path, eval_ngrams in eval_ngram_index.items():
+            overlap = row_ngrams & eval_ngrams
+            if overlap:
+                fails.append(
+                    Failure(
+                        f"contamination row={row.get('id', '<no-id>')} ({source_file}:{line_no})",
+                        f"shares {len(overlap)} normalized 8-gram(s) with eval-only asset "
+                        f"{asset_path}: e.g. {next(iter(overlap))!r}",
+                    )
+                )
+
+    return fails
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check-manifest",
+        action="store_true",
+        help="recompute sha256 for manifest entries and report mismatches",
+    )
+    parser.add_argument(
+        "--contamination",
+        action="store_true",
+        help="run normalized 8-gram overlap check between train/dev rows and eval-only manifest assets",
+    )
+    args = parser.parse_args(argv)
+
+    all_fails: list[Failure] = []
+    all_warns: list[Warning_] = []
+
+    rows_files = load_rows_files()
+    if not rows_files:
+        all_warns.append(Warning_("rows", f"no rows/*.jsonl files found under {ROWS_DIR}"))
+
+    all_parsed_rows: list[tuple[dict[str, Any], int, str]] = []
+
+    for rows_file in rows_files:
+        parsed = parse_jsonl(rows_file)
+        for line_no, obj, parse_error in parsed:
+            source_file = rows_file.name
+            if parse_error is not None:
+                all_fails.append(Failure(f"{source_file}:{line_no}", f"invalid JSON: {parse_error}"))
+                continue
+            if obj is None:
+                continue
+            row_fails = validate_row(obj, line_no, source_file)
+            all_fails.extend(row_fails)
+            # Only feed schema-clean-enough rows into quarantine/contamination
+            # checks (need provenance/split/family_id/text present as the
+            # right types); still attempt best-effort on partial rows so
+            # quarantine violations aren't masked by unrelated schema fails.
+            if isinstance(obj, dict):
+                all_parsed_rows.append((obj, line_no, source_file))
+
+    quarantine_fails = enforce_quarantine(all_parsed_rows)
+    all_fails.extend(quarantine_fails)
+
+    if args.check_manifest:
+        manifest_fails, manifest_warns = check_manifest()
+        all_fails.extend(manifest_fails)
+        all_warns.extend(manifest_warns)
+
+    if args.contamination:
+        contamination_fails = run_contamination_check(all_parsed_rows)
+        all_fails.extend(contamination_fails)
+
+    for w in all_warns:
+        print(w, file=sys.stderr)
+    for f in all_fails:
+        print(f, file=sys.stderr)
+
+    total_rows = len(all_parsed_rows)
+    print(
+        f"\npii-bank validate: {total_rows} row(s) checked across {len(rows_files)} file(s), "
+        f"{len(all_fails)} FAIL(s), {len(all_warns)} WARN(s)"
+        + (" [--check-manifest]" if args.check_manifest else "")
+        + (" [--contamination]" if args.contamination else "")
+    )
+
+    if all_fails:
+        print("RESULT: FAIL", file=sys.stderr)
+        return 1
+    print("RESULT: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
