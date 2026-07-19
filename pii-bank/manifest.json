@@ -1,41 +1,41 @@
 {
-  "$schema_note": "Eval-quarantine manifest for the pii-bank (prd-2026-07-19-pii-data-bank-finetune-pilot.md). Every entry below is eval-ONLY content: never trained on, referenced by hash — never by content — from this public repo. Entry schema: {path_or_ref, sha256, location_class, role, note}. location_class values: 'local' (lives under ~/Opus Advisor/context/ or specs/, outside this repo, Marc's machine only), 'dsa-origin-main' (lives in dual-sandbox-architecture at a pinned commit, extracted as a pristine local copy for hashing), 'repo' (would live inside this repo — none yet in S1; reserved for future eval-only assets committed here, e.g. rows/*eval-only*.jsonl once S2+ needs it).",
+  "$schema_note": "Eval-quarantine manifest for the pii-bank (prd-2026-07-19-pii-data-bank-finetune-pilot.md). Every entry below is eval-ONLY content: never trained on, referenced by hash -- never by content -- from this public repo. Entry schema: {path_or_ref, sha256, location_class, role, note}. location_class semantics: 'local' = a path RELATIVE to the operator machine's local root, resolved via env var PII_BANK_LOCAL_ROOT (default '~/Opus Advisor'); absolute personal home-directory paths are a leak class in this public repo and validate.py hard-fails them in every mode. 'dsa-origin-main' = a path inside the dual-sandbox-architecture repo at the pinned commit recorded below; descriptive reference, not independently re-hashable by this stdlib-only tooling (its content is verified via the hash-identical 'local' extraction twin). 'repo' = a path relative to this pii-bank/ directory -- none yet in S1; reserved for future eval-only assets committed here, e.g. rows/*eval-only*.jsonl once S2+ needs it.",
   "dsa_origin_main_sha_used_for_extraction": "ae42a6753fcb3d9ae9e577642bf5e987528c18cd",
   "entries": [
     {
-      "path_or_ref": "/Users/marcschuelke/Opus Advisor/specs/corpus-2026-07-19-overredaction.jsonl",
+      "path_or_ref": "specs/corpus-2026-07-19-overredaction.jsonl",
       "sha256": "c899a5cbe4dfae22b767e4afa99669dda74c244c2d9dac5e164b7bb6a94d2501",
       "location_class": "local",
       "role": "eval-only",
       "note": "The 41-row over-redaction corpus (PRD bar 2). Byte-identical to its shipped DSA twin below (both are the same corpus, verified via diff at S1 time)."
     },
     {
-      "path_or_ref": "/Users/marcschuelke/Opus Advisor/specs/corpus-2026-07-17-prose-breadth.md",
+      "path_or_ref": "specs/corpus-2026-07-17-prose-breadth.md",
       "sha256": "9cfa302df04f10daf66cece283f9ce111d7cb852ebf80754fc4d98f0a93ddc28",
       "location_class": "local",
       "role": "eval-only",
       "note": "The breadth corpus referenced by the PRD's prose-gap pilot-gating discussion (Marc's rule: pilot-gating IFF leaks across many use-case shapes)."
     },
     {
-      "path_or_ref": "/Users/marcschuelke/Opus Advisor/context/sanitizer-recall/slice2b-cf2-measurement.json",
+      "path_or_ref": "context/sanitizer-recall/slice2b-cf2-measurement.json",
       "sha256": "87d270a4b3218a799854e66a0fb8c8e3bad50c86654cc2319924af40e5e9f969",
       "location_class": "local",
       "role": "eval-only",
       "note": "CF2 snake-slug/camelCase person-name measurement (S2b oracle). PRD bar 3."
     },
     {
-      "path_or_ref": "/Users/marcschuelke/Opus Advisor/context/pii-bank/eval-imports/clinical-german-v1.jsonl",
+      "path_or_ref": "context/pii-bank/eval-imports/clinical-german-v1.jsonl",
       "sha256": "c5e7781e5caaf9f251c399fba9a2d1e818dad26d28ccc13400213f0c4881c20a",
       "location_class": "local",
       "role": "eval-only",
       "note": "Pristine local copy, extracted via 'git show origin/main:training/eval-dataset/clinical-german-v1.jsonl' at dsa-origin-main SHA ae42a6753fcb3d9ae9e577642bf5e987528c18cd. Original lives at dual-sandbox-architecture:training/eval-dataset/clinical-german-v1.jsonl and is exercised by services/sanitizer/tests/eval_recall_test.py:67 (PRD bar 1, model-standalone recall)."
     },
     {
-      "path_or_ref": "/Users/marcschuelke/Opus Advisor/context/pii-bank/eval-imports/overredaction_corpus_dsa.jsonl",
+      "path_or_ref": "context/pii-bank/eval-imports/overredaction_corpus_dsa.jsonl",
       "sha256": "c899a5cbe4dfae22b767e4afa99669dda74c244c2d9dac5e164b7bb6a94d2501",
-      "location_class": "dsa-origin-main",
+      "location_class": "local",
       "role": "eval-only",
-      "note": "Pristine local copy, extracted via 'git show origin/main:services/sanitizer/tests/fixtures/overredaction_corpus.jsonl' at dsa-origin-main SHA ae42a6753fcb3d9ae9e577642bf5e987528c18cd. Original lives at dual-sandbox-architecture:services/sanitizer/tests/fixtures/overredaction_corpus.jsonl (merged #395; shipped DSA fixture gate). Byte-identical to the specs/ copy above (verified via diff at S1 time) -- this is the 'BOTH copies' entry the PRD's Eval quarantine bullet (c) calls out."
+      "note": "Pristine local copy of the shipped DSA fixture, extracted via 'git show origin/main:services/sanitizer/tests/fixtures/overredaction_corpus.jsonl' at dsa-origin-main SHA ae42a6753fcb3d9ae9e577642bf5e987528c18cd. Original lives at dual-sandbox-architecture:services/sanitizer/tests/fixtures/overredaction_corpus.jsonl (merged #395; shipped DSA fixture gate). Byte-identical to the specs/ copy above (verified via diff at S1 time) -- this is the 'BOTH copies' entry the PRD's Eval quarantine bullet (c) calls out."
     },
     {
       "path_or_ref": "training/eval-dataset/clinical-german-v1.jsonl",

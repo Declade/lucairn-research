@@ -2,18 +2,19 @@
 
 Covers: a valid row passes clean; each FAIL class fires (bad enum,
 train+measured-provenance, public-repo+dogfood-provenance, span out-of-bounds,
-family-split inconsistency, manifest hash mismatch via a temp file); and the
-contamination check fires on a real overlap and stays clean without one.
+family-split inconsistency, manifest hash mismatch via a temp file, manifest
+home-directory path leak); local-root resolution via PII_BANK_LOCAL_ROOT; and
+the contamination check fires on a real overlap and stays clean without one.
 """
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import importlib.util
 import json
+import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -300,6 +301,122 @@ class TestManifestMismatch:
         monkeypatch.setattr(validate, "MANIFEST_PATH", tmp_path / "no-manifest-here.json")
         fails, warns = validate.check_manifest()
         assert any("not found" in str(f) for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# manifest path-leak guard (home-directory paths in a PUBLIC repo)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestPathLeak:
+    # NOTE: the leaky fixture path is CONSTRUCTED from components (not written
+    # as a literal) so that a repo-wide grep for the home-path leak class
+    # stays clean -- the guard's runtime behavior is what these tests pin.
+    USERS_PREFIXED = str(PurePosixPath("/", "Users", "synthetic-test-user", "leaked-asset.jsonl"))
+
+    def _manifest_with(self, tmp_path: Path, path_or_ref: str) -> Path:
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": path_or_ref,
+                    "sha256": "a" * 64,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "leak-guard test fixture",
+                }
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+        return mp
+
+    def test_users_prefixed_path_fails_check_manifest(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_with(tmp_path, self.USERS_PREFIXED))
+        fails, _warns = validate.check_manifest()
+        assert any("home-directory" in str(f) for f in fails)
+
+    def test_home_literal_in_path_fails(self, tmp_path, monkeypatch):
+        home = os.path.expanduser("~")
+        if home == "~":
+            pytest.skip("no expandable home directory on this platform")
+        # Deliberately NOT macOS-user-tree-prefixed, to isolate the
+        # home-literal guard from the tree guard.
+        leaky = "/data" + home + "/leaked-asset.jsonl"
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_with(tmp_path, leaky))
+        fails, _warns = validate.check_manifest()
+        assert any("home directory" in str(f) for f in fails)
+
+    def test_main_default_mode_catches_manifest_leak(self, tmp_path, monkeypatch):
+        # The guard must fire on a plain `validate.py` run (no --check-manifest),
+        # so a leaked home path can never ride a default validation pass.
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        (rows_dir / "ok.jsonl").write_text(json.dumps(make_valid_row()) + "\n", encoding="utf-8")
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_with(tmp_path, self.USERS_PREFIXED))
+        assert validate.main([]) == 1
+
+    def test_leaky_entry_skips_hash_check(self, tmp_path, monkeypatch):
+        # A leak FAIL must not be accompanied by a bogus mismatch/missing
+        # result for the same entry -- hygiene short-circuits that entry.
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_with(tmp_path, self.USERS_PREFIXED))
+        fails, warns = validate.check_manifest()
+        assert all("sha256 mismatch" not in str(f) for f in fails)
+        assert warns == []
+
+
+class TestLocalRootResolution:
+    def test_relative_local_entry_resolves_against_env_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "custom-root"
+        (root / "sub").mkdir(parents=True)
+        content = '{"text": "hello world"}\n'
+        (root / "sub" / "asset.jsonl").write_text(content, encoding="utf-8")
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": "sub/asset.jsonl",
+                    "sha256": actual_hash,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "env-root resolution test fixture",
+                }
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        monkeypatch.setenv("PII_BANK_LOCAL_ROOT", str(root))
+        fails, warns = validate.check_manifest()
+        assert fails == []
+        assert warns == []
+
+    def test_relative_entry_missing_under_root_warns_not_fails(self, tmp_path, monkeypatch):
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": "sub/definitely-missing.jsonl",
+                    "sha256": "b" * 64,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "missing-under-root test fixture",
+                }
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        monkeypatch.setenv("PII_BANK_LOCAL_ROOT", str(tmp_path / "empty-root"))
+        fails, warns = validate.check_manifest()
+        assert fails == []
+        assert any("skipping hash check" in str(w) for w in warns)
+
+    def test_default_local_root_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("PII_BANK_LOCAL_ROOT", raising=False)
+        assert validate.get_local_root() == Path(os.path.expanduser("~")) / "Opus Advisor"
 
 
 # ---------------------------------------------------------------------------

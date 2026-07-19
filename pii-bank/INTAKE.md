@@ -25,9 +25,11 @@ schema, `manifest.json` for the eval-quarantine manifest). Governing PRD:
      engagement's own environment produced it under contract — never anything
      that implies pooled/cross-customer use). These rows are **eval-only**
      (`split: eval-only`) by construction — see Quarantine rules in
-     `README.md`. **They are never committed to this repo.** They go in the
-     LOCAL-ONLY root, `~/Opus Advisor/context/pii-bank/measured/`, and are
-     referenced from this repo's `manifest.json` by absolute path + sha256.
+     `README.md`. **They are never committed to this repo.** They go under
+     the LOCAL-ONLY root (env `PII_BANK_LOCAL_ROOT`, default
+     `~/Opus Advisor`) at `context/pii-bank/measured/`, and are referenced
+     from this repo's `manifest.json` by local-root-relative path + sha256 —
+     never by absolute personal path (`validate.py` hard-fails those).
    - A finding that is **re-synthesized** as a fresh, non-identifying variant
      (same class of surface form/context, different actual content — e.g. a
      different snake_case identifier that exhibits the same FP class as a

@@ -1,17 +1,18 @@
 # pii-bank — labeled-data bank for the GLiNER fine-tune pilot
 
 Schema, quarantine tooling, and fully-synthetic seed rows for the PII labeled-data
-bank described in
-[`prd-2026-07-19-pii-data-bank-finetune-pilot.md`](https://github.com/Declade/Opus-Advisor)
-(`Opus Advisor/specs/prd-2026-07-19-pii-data-bank-finetune-pilot.md`, Status Locked).
+bank described in the governing PRD
+`prd-2026-07-19-pii-data-bank-finetune-pilot.md` (operator-local `specs/`
+directory, Status Locked).
 
 This directory is **PUBLIC** (`Declade/lucairn-research`, default branch `main`).
 Per the PRD's Locked constraint on data placement, it contains **schema, tooling,
 the eval-quarantine manifest (hashes only), and fully-synthetic seed rows only.**
 Every row with `provenance` other than `synthetic-generated` — measured-live gate
 findings, dogfood transcripts, and eval-only imports from other repos — lives in
-the LOCAL-ONLY root `~/Opus Advisor/context/pii-bank/` and is referenced from here
-by absolute path + sha256, never by content. See `manifest.json` and `INTAKE.md`.
+a LOCAL-ONLY root on the operator machine (see below) and is referenced from here
+by local-root-relative path + sha256, never by content and never by absolute
+personal path. See `manifest.json` and `INTAKE.md`.
 
 ## Row schema
 
@@ -50,10 +51,13 @@ PRD § Methodology protocol — "Splits by FAMILY, never by row").
 
 - `README.md` — this file (schema spec).
 - `manifest.json` — eval-quarantine manifest: sha256 + location class for every
-  measured/eval-only asset referenced by this bank (see below).
+  measured/eval-only asset referenced by this bank (see below). `local` entries
+  are recorded **relative to the local root** — never as absolute paths.
 - `validate.py` — stdlib-only CLI: schema validation, quarantine enforcement,
-  manifest hash verification (`--check-manifest`), and train/eval contamination
-  scan (`--contamination`).
+  manifest hash verification (`--check-manifest`), train/eval contamination
+  scan (`--contamination`), and an always-on path-hygiene guard that hard-fails
+  any manifest entry embedding a personal home-directory path (this repo is
+  public; home paths are a personal-info leak class).
 - `tests/test_validate.py` — pytest coverage for every FAIL class.
 - `INTAKE.md` — discipline doc: how a verified finding becomes a bank row, and
   the org-scoping design.
@@ -62,18 +66,32 @@ PRD § Methodology protocol — "Splits by FAMILY, never by row").
 
 ## Local-only root
 
-`~/Opus Advisor/context/pii-bank/` (not part of this repo):
+Manifest `local` entries resolve against a configurable root on the operator
+machine, set via the env var **`PII_BANK_LOCAL_ROOT`** (default:
+`~/Opus Advisor`). This keeps the public manifest free of machine-specific
+absolute paths and makes the tooling portable — another machine holding the
+same corpora simply sets a different root. Under that root:
 
-- `eval-imports/` — pristine copies of the two DSA eval fixtures extracted from
-  `origin/main` (see `manifest.json` for hashes + the exact commit SHA).
-- `measured/` — measured/dogfood rows; never committed here.
+- `context/pii-bank/eval-imports/` — pristine copies of the two DSA eval
+  fixtures extracted from `origin/main` (see `manifest.json` for hashes + the
+  exact commit SHA).
+- `context/pii-bank/measured/` — measured/dogfood rows; never committed here.
+- `specs/` and `context/sanitizer-recall/` — the measured corpora referenced
+  by the manifest's other `local` entries.
+
+Missing local files downgrade to WARN-skip in `--check-manifest` (the public
+repo's CI cannot see the operator machine); hash MISMATCHES on readable files
+always FAIL.
 
 ## Usage
 
 ```bash
 cd pii-bank
-python3 validate.py                    # schema + quarantine checks
+python3 validate.py                    # schema + quarantine + path-hygiene checks
 python3 validate.py --check-manifest   # + recompute manifest hashes
 python3 validate.py --contamination    # + train/eval n-gram overlap scan
 python3 -m pytest tests/               # unit tests
+
+# resolve manifest 'local' entries against a non-default root:
+PII_BANK_LOCAL_ROOT=/path/to/root python3 validate.py --check-manifest
 ```

@@ -13,6 +13,11 @@ Stdlib-only (no new deps). Implements:
   (d) --contamination: normalized 8-gram overlap check between every
       train/dev row and every readable eval-only asset referenced in the
       manifest
+  (e) path-hygiene guard, run in EVERY mode: manifest 'local' entries are
+      recorded RELATIVE to a local root (env var PII_BANK_LOCAL_ROOT,
+      default '~/Opus Advisor'); any path_or_ref embedding an absolute
+      personal home-directory path hard-fails -- this repo is PUBLIC and
+      home paths are a personal-info leak class
 
 Exit code 0 on a fully clean run, 1 if any FAIL was recorded.
 
@@ -25,14 +30,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
 ROWS_DIR = HERE / "rows"
 MANIFEST_PATH = HERE / "manifest.json"
+
+# Local root against which relative 'local' manifest entries resolve.
+# Portable across machines: set PII_BANK_LOCAL_ROOT to relocate the root.
+LOCAL_ROOT_ENV_VAR = "PII_BANK_LOCAL_ROOT"
+DEFAULT_LOCAL_ROOT = "~/Opus Advisor"
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -322,6 +333,73 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
+def get_local_root() -> Path:
+    """Root against which relative 'local' manifest entries resolve."""
+    raw = os.environ.get(LOCAL_ROOT_ENV_VAR) or DEFAULT_LOCAL_ROOT
+    return Path(os.path.expanduser(raw))
+
+
+def resolve_local_ref(path_or_ref: str) -> Path:
+    """Resolve a manifest 'local' path_or_ref. Relative refs resolve against
+    the local root; absolute refs (e.g. temp-dir test fixtures) pass through
+    unchanged -- but see path_or_ref_hygiene_fails, which bans absolute
+    personal home-directory paths outright."""
+    p = Path(path_or_ref)
+    if p.is_absolute():
+        return p
+    return get_local_root() / p
+
+
+def path_or_ref_hygiene_fails(scope: str, path_or_ref: str) -> list[Failure]:
+    """Guard the home-directory path-leak class: manifest entries in this
+    PUBLIC repo must never embed a personal home path. 'local' entries are
+    recorded relative to the local root instead. (The startswith check is
+    expressed via path components so this file itself never contains a
+    home-path literal.)"""
+    fails: list[Failure] = []
+    hint = (
+        f"record 'local' entries relative to the local root "
+        f"(env {LOCAL_ROOT_ENV_VAR}, default {DEFAULT_LOCAL_ROOT!r})"
+    )
+    parts = PurePosixPath(path_or_ref).parts
+    if len(parts) >= 2 and parts[0] == "/" and parts[1] == "Users":
+        fails.append(
+            Failure(
+                scope,
+                f"path_or_ref {path_or_ref!r} embeds an absolute macOS user "
+                f"home-directory path; {hint}",
+            )
+        )
+    home = os.path.expanduser("~")
+    if home != "~" and home in path_or_ref:
+        fails.append(
+            Failure(
+                scope,
+                f"path_or_ref {path_or_ref!r} contains this machine's home directory; {hint}",
+            )
+        )
+    return fails
+
+
+def manifest_hygiene_only() -> list[Failure]:
+    """Path-leak guard over manifest.json, run in EVERY mode (even without
+    --check-manifest) so a leaked home path can never ride a default run."""
+    if not MANIFEST_PATH.is_file():
+        return []
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [Failure("manifest", f"manifest.json is not valid JSON: {exc}")]
+    entries = manifest.get("entries", [])
+    if not isinstance(entries, list):
+        return [Failure("manifest", "manifest.json 'entries' must be a list")]
+    fails: list[Failure] = []
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and isinstance(entry.get("path_or_ref"), str):
+            fails.extend(path_or_ref_hygiene_fails(f"manifest.entries[{i}]", entry["path_or_ref"]))
+    return fails
+
+
 def check_manifest() -> tuple[list[Failure], list[Warning_]]:
     fails: list[Failure] = []
     warns: list[Warning_] = []
@@ -357,8 +435,13 @@ def check_manifest() -> tuple[list[Failure], list[Warning_]]:
         expected_hash = entry["sha256"]
         location_class = entry["location_class"]
 
+        hygiene = path_or_ref_hygiene_fails(scope, str(path_or_ref))
+        if hygiene:
+            fails.extend(hygiene)
+            continue
+
         if location_class == "local":
-            p = Path(path_or_ref)
+            p = resolve_local_ref(str(path_or_ref))
             if not p.is_file():
                 warns.append(Warning_(scope, f"local entry missing on disk, skipping hash check: {p}"))
                 continue
@@ -469,7 +552,10 @@ def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]
             continue
         if entry.get("location_class") != "local":
             continue
-        p = Path(entry.get("path_or_ref", ""))
+        raw_ref = entry.get("path_or_ref", "")
+        if not isinstance(raw_ref, str) or not raw_ref:
+            continue
+        p = resolve_local_ref(raw_ref)
         if not p.is_file():
             continue
         eval_texts = extract_eval_texts_from_asset(p)
@@ -555,6 +641,10 @@ def main(argv: list[str] | None = None) -> int:
         manifest_fails, manifest_warns = check_manifest()
         all_fails.extend(manifest_fails)
         all_warns.extend(manifest_warns)
+    else:
+        # Path-leak guard runs in EVERY mode: a home-directory path in the
+        # committed manifest must fail even a plain `validate.py` run.
+        all_fails.extend(manifest_hygiene_only())
 
     if args.contamination:
         contamination_fails = run_contamination_check(all_parsed_rows)
