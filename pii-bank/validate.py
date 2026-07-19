@@ -15,8 +15,10 @@ Stdlib-only (no new deps). Implements:
       exist and match
   (d) --contamination: NFKC+casefold-normalized 8-gram overlap check between
       every train/dev row and the eval-only assets referenced in the manifest
-      ('local' AND 'repo' entries). FAIL-CLOSED: a missing/unreadable eval
-      asset FAILs, and zero loadable eval assets FAILs outright
+      ('local' AND 'repo' entries). FAIL-CLOSED, per asset: a missing,
+      unreadable, unparseable, OR zero-n-gram (empty / no scannable content)
+      eval asset FAILs naming the asset, and zero loadable eval assets FAILs
+      outright -- a PASS proves EVERY local/repo eval asset actually loaded
   (e) path-hygiene guard, run in EVERY mode: manifest 'local' entries are
       recorded RELATIVE to a local root (env var PII_BANK_LOCAL_ROOT,
       default '~/Opus Advisor'); any path_or_ref embedding an absolute
@@ -444,16 +446,24 @@ def path_or_ref_hygiene_fails(scope: str, path_or_ref: str) -> list[Failure]:
         f"record 'local' entries relative to the local root "
         f"(env {LOCAL_ROOT_ENV_VAR}, default {DEFAULT_LOCAL_ROOT!r})"
     )
-    # URI schemes (file:, http:, ...) can smuggle absolute paths past the
-    # path-component checks below (terra F7 probe: a file: URI wrapping a
-    # user-home path). Manifest refs are plain paths -- fail-closed on any
-    # scheme rather than trying to parse them.
-    if "://" in path_or_ref:
+    # URI schemes can smuggle absolute paths past the path-component checks
+    # below. The '://' authority form is not the only one: the RFC-8089
+    # single-slash form (file:/Users/other/eval.jsonl) and the bare-scheme
+    # form (file:eval.jsonl) both carry a scheme without '//', and a Windows
+    # drive letter (C:\...) also embeds a colon. Manifest refs are plain
+    # POSIX-relative paths, in which a colon is never legitimate -- so
+    # fail-closed on ANY ':' rather than enumerating scheme shapes. This one
+    # predicate subsumes scheme://, scheme:/, scheme:, and drive letters
+    # (bug-hunter finding on ae343f3: the '://'-only check let a single-slash
+    # file: URI leak a home path into the public manifest).
+    if ":" in path_or_ref:
         fails.append(
             Failure(
                 scope,
-                f"path_or_ref {path_or_ref!r} contains a URI scheme; manifest refs are "
-                f"plain paths only -- {hint}",
+                f"path_or_ref {path_or_ref!r} contains a ':'; colons are forbidden in "
+                f"manifest refs (they smuggle URI schemes like file:/... or Windows drive "
+                f"letters past the path checks) -- manifest refs are plain POSIX-relative "
+                f"paths only -- {hint}",
             )
         )
     parts = PurePosixPath(path_or_ref).parts
@@ -602,30 +612,45 @@ def ngrams(text: str, n: int = 8) -> set[str]:
     return {" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)}
 
 
-def extract_eval_texts_from_asset(path: Path) -> list[str]:
+def extract_eval_texts_from_asset(path: Path) -> tuple[list[str], str | None]:
     """Text extraction from a manifest eval asset for contamination scanning.
-    Supports .jsonl (looks for a 'text' or 'snippet' field per line) and
-    falls back to raw file content for anything else (e.g. .md, .json blobs).
-    OSError propagates to the caller: the contamination mode is fail-closed
-    and must FAIL (not skip) an unreadable asset (terra F2)."""
+    Returns (texts, parse_error): parse_error is None on a clean parse, else a
+    short reason string. Supports .jsonl (a 'text'/'snippet' field per line),
+    .json (whole-file parse), and falls back to raw file content for anything
+    else (e.g. .md blobs). A readable-but-malformed asset must FAIL (not be
+    silently omitted) -- the contamination mode is fail-closed (bug-hunter
+    finding on ae343f3: a malformed/empty JSONL yielded zero n-grams and was
+    silently dropped, so PASS did not prove every eval asset actually loaded).
+    OSError propagates to the caller: an unreadable asset also FAILs (terra F2).
+    Text extraction itself is UNCHANGED -- this only adds parse-status
+    reporting; a .jsonl row simply lacking text/snippet is not a parse error."""
     texts: list[str] = []
     if path.suffix == ".jsonl":
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             try:
                 obj = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as exc:
+                return texts, f"unparseable JSONL at line {line_no}: {exc}"
             if isinstance(obj, dict):
                 for key in ("text", "snippet"):
                     val = obj.get(key)
                     if isinstance(val, str) and val:
                         texts.append(val)
+    elif path.suffix == ".json":
+        raw = path.read_text(encoding="utf-8")
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return texts, f"unparseable JSON: {exc}"
+        # The whole-file JSON text (keys + values) is what we scan -- the CF2
+        # oracle is a JSON blob, not a rows file.
+        texts.append(raw)
     else:
         texts.append(path.read_text(encoding="utf-8"))
-    return texts
+    return texts, None
 
 
 def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]]) -> list[Failure]:
@@ -671,17 +696,41 @@ def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]
             )
             continue
         try:
-            eval_texts = extract_eval_texts_from_asset(p)
+            eval_texts, parse_error = extract_eval_texts_from_asset(p)
         except OSError as exc:
             fails.append(
                 Failure(scope, f"eval-only asset unreadable -- contamination is fail-closed: {p}: {exc}")
             )
             continue
+        # Per-asset fail-closed accounting: PASS must prove EVERY local/repo
+        # eval asset actually loaded. (a) parse-failure and (b) an asset that
+        # contributes zero n-grams (empty/whitespace file, or a JSONL with no
+        # text/snippet content) are BOTH failures naming the asset -- a
+        # silently-omitted asset would leave the contamination check vouching
+        # only for the assets that happened to index (bug-hunter finding on
+        # ae343f3).
+        if parse_error is not None:
+            fails.append(
+                Failure(
+                    scope,
+                    f"eval-only asset parse-failure -- contamination is fail-closed: {p}: {parse_error}",
+                )
+            )
+            continue
         combined_ngrams: set[str] = set()
         for t in eval_texts:
             combined_ngrams |= ngrams(t)
-        if combined_ngrams:
-            eval_ngram_index[str(p)] = combined_ngrams
+        if not combined_ngrams:
+            fails.append(
+                Failure(
+                    scope,
+                    f"eval-only asset contributed zero n-grams -- contamination is fail-closed: {p} "
+                    f"(readable but empty or no scannable text content; a passing check must prove "
+                    f"every eval asset indexed at least one normalized 8-gram)",
+                )
+            )
+            continue
+        eval_ngram_index[str(p)] = combined_ngrams
 
     if not eval_ngram_index:
         fails.append(

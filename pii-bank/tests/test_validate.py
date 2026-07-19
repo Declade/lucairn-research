@@ -609,6 +609,48 @@ class TestManifestPathLeak:
         fails = validate.path_or_ref_hygiene_fails("probe", "https://example.com/corpus.jsonl")
         assert any("URI scheme" in str(f) for f in fails)
 
+    def test_single_slash_file_uri_fails(self):
+        # bug-hunter finding on ae343f3: the RFC-8089 single-slash form
+        # (file:/Users/...) carries a scheme WITHOUT '//', so the old
+        # '://'-only check let it leak a home path into the public manifest.
+        # (Constructed from components so the repo-wide home-path grep stays clean.)
+        single_slash = "file:" + str(PurePosixPath("/", "Users", "other-operator", "eval.jsonl"))
+        assert "://" not in single_slash  # the probe is only meaningful if there's no authority '//'
+        fails = validate.path_or_ref_hygiene_fails("probe", single_slash)
+        assert any("colons are forbidden" in str(f) for f in fails)
+
+    def test_bare_scheme_ref_fails(self):
+        # scheme:relative form (no slashes at all) -- also a colon.
+        fails = validate.path_or_ref_hygiene_fails("probe", "file:eval.jsonl")
+        assert any("colons are forbidden" in str(f) for f in fails)
+
+    def test_windows_drive_letter_ref_fails(self):
+        # A Windows drive letter embeds a colon and would resolve absolute.
+        fails = validate.path_or_ref_hygiene_fails("probe", "C:/Users/other/eval.jsonl")
+        assert any("colons are forbidden" in str(f) for f in fails)
+
+    def test_plain_relative_refs_still_pass_hygiene(self):
+        # Fail-closed-on-colon must NOT flag the legitimate committed refs,
+        # which are all plain POSIX-relative (no colon anywhere).
+        for ref in (
+            "specs/corpus-2026-07-19-overredaction.jsonl",
+            "context/pii-bank/eval-imports/clinical-german-v1.jsonl",
+            "training/eval-dataset/clinical-german-v1.jsonl",
+            "rows/synthetic-seed.jsonl",
+        ):
+            assert validate.path_or_ref_hygiene_fails("probe", ref) == [], f"unexpected fail on {ref!r}"
+
+    def test_single_slash_file_uri_caught_in_default_mode(self, tmp_path, monkeypatch):
+        # End-to-end: a single-slash file: ref in the committed manifest must
+        # fail even a plain `validate.py` run (manifest_hygiene_only).
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        (rows_dir / "ok.jsonl").write_text(json.dumps(make_valid_row()) + "\n", encoding="utf-8")
+        leaky = "file:" + str(PurePosixPath("/", "Users", "other-operator", "eval.jsonl"))
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_with(tmp_path, leaky))
+        assert validate.main([]) == 1
+
 
 class TestLocalRootResolution:
     def test_relative_local_entry_resolves_against_env_root(self, tmp_path, monkeypatch):
@@ -812,6 +854,125 @@ class TestContaminationFailClosed:
         # the missing asset FAILs AND the present asset still catches the overlap
         assert any("fail-closed" in str(f) for f in fails)
         assert any("8-gram" in str(f) for f in fails)
+
+
+class TestContaminationPerAssetAccounting:
+    # bug-hunter finding on ae343f3: a READABLE but malformed/empty JSONL
+    # yielded zero n-grams and was silently OMITTED from the eval index while
+    # other assets indexed -- so PASS did not prove every local/repo eval
+    # asset actually loaded. Per-asset accounting is fail-closed now: every
+    # asset must parse AND contribute >=1 n-gram.
+
+    def _manifest(self, tmp_path, entries):
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+        return mp
+
+    def _local_entry(self, path, note):
+        return {
+            "path_or_ref": str(path),
+            "sha256": "x",
+            "location_class": "local",
+            "role": "eval-only",
+            "note": note,
+        }
+
+    def test_empty_jsonl_asset_fails_naming_it(self, tmp_path, monkeypatch):
+        # PROBE 1: one empty .jsonl + one real asset -> FAIL naming the empty
+        # one (pre-fix: the empty asset was silently dropped and the check
+        # PASSED against only the real asset).
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        real = tmp_path / "real.jsonl"
+        real.write_text(
+            json.dumps({"text": "penguins in antarctica exploring the vast frozen ice shelves today"}) + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            validate,
+            "MANIFEST_PATH",
+            self._manifest(tmp_path, [self._local_entry(empty, "empty"), self._local_entry(real, "real")]),
+        )
+        clean_train = make_valid_row(
+            id="clean-train", split="train", text="A totally different sentence about mountain biking trails."
+        )
+        fails = validate.run_contamination_check([(clean_train, 1, "t.jsonl")])
+        # names the empty asset with the zero-n-gram reason
+        assert any("zero n-grams" in str(f) and "empty.jsonl" in str(f) for f in fails)
+
+    def test_whitespace_only_jsonl_asset_fails(self, tmp_path, monkeypatch):
+        # A file with only blank lines also contributes zero n-grams.
+        blanks = tmp_path / "blanks.jsonl"
+        blanks.write_text("\n   \n\n", encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest(tmp_path, [self._local_entry(blanks, "blanks")]))
+        fails = validate.run_contamination_check([])
+        assert any("zero n-grams" in str(f) and "blanks.jsonl" in str(f) for f in fails)
+
+    def test_malformed_jsonl_asset_fails(self, tmp_path, monkeypatch):
+        # PROBE 2: a readable-but-unparseable .jsonl -> FAIL (parse-failure).
+        bad = tmp_path / "malformed.jsonl"
+        bad.write_text("{this is not valid json at all,,,\n", encoding="utf-8")
+        real = tmp_path / "real.jsonl"
+        real.write_text(
+            json.dumps({"text": "penguins in antarctica exploring the vast frozen ice shelves today"}) + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            validate,
+            "MANIFEST_PATH",
+            self._manifest(tmp_path, [self._local_entry(bad, "malformed"), self._local_entry(real, "real")]),
+        )
+        fails = validate.run_contamination_check([])
+        assert any("parse-failure" in str(f) and "malformed.jsonl" in str(f) for f in fails)
+
+    def test_malformed_json_asset_fails(self, tmp_path, monkeypatch):
+        # A .json asset (the CF2-oracle format) that is unparseable also FAILs.
+        badjson = tmp_path / "oracle.json"
+        badjson.write_text("{not valid json", encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest(tmp_path, [self._local_entry(badjson, "badjson")]))
+        fails = validate.run_contamination_check([])
+        assert any("parse-failure" in str(f) and "oracle.json" in str(f) for f in fails)
+
+    def test_valid_json_asset_indexes_and_catches_overlap(self, tmp_path, monkeypatch):
+        # A well-formed .json asset must parse, contribute n-grams, and catch
+        # an overlap -- proving the .json path is scannable, not just gated.
+        shared = "the quick brown fox jumps over the lazy dog today in the park"
+        oracle = tmp_path / "oracle.json"
+        oracle.write_text(json.dumps({"cases": [{"sentence": shared}]}), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest(tmp_path, [self._local_entry(oracle, "oracle")]))
+        train_row = make_valid_row(id="json-overlap", split="train", text=shared)
+        fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
+        assert any("8-gram" in str(f) for f in fails)
+
+    def test_empty_asset_caught_end_to_end(self, tmp_path, monkeypatch):
+        # main --contamination must exit 1 when a manifest eval asset is empty.
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        (rows_dir / "ok.jsonl").write_text(json.dumps(make_valid_row()) + "\n", encoding="utf-8")
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest(tmp_path, [self._local_entry(empty, "empty")]))
+        assert validate.main(["--contamination"]) == 1
+
+    def test_all_assets_loading_still_passes(self, tmp_path, monkeypatch):
+        # Regression: when every asset parses AND contributes n-grams, and no
+        # train/dev row overlaps, the check PASSES (no false positive from the
+        # new per-asset gate).
+        a = tmp_path / "a.jsonl"
+        a.write_text(json.dumps({"text": "alpha bravo charlie delta echo foxtrot golf hotel india"}) + "\n", encoding="utf-8")
+        b = tmp_path / "b.md"
+        b.write_text("juliet kilo lima mike november oscar papa quebec romeo sierra tango", encoding="utf-8")
+        monkeypatch.setattr(
+            validate,
+            "MANIFEST_PATH",
+            self._manifest(tmp_path, [self._local_entry(a, "a"), self._local_entry(b, "b")]),
+        )
+        clean_train = make_valid_row(
+            id="clean", split="train", text="completely disjoint words zebra yankee xray whiskey victor uniform tango"
+        )
+        fails = validate.run_contamination_check([(clean_train, 1, "t.jsonl")])
+        assert fails == [], f"expected clean PASS, got: {[str(f) for f in fails]}"
 
 
 class TestContaminationUnicodeNormalization:
