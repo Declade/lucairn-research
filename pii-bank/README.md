@@ -37,9 +37,11 @@ Every row is one JSON object per line in a `rows/*.jsonl` file. Fields:
 
 1. Any row with `split` in `{train, dev}` **must** have `provenance = synthetic-generated`.
    Measured/dogfood/eval-import rows may only ever carry `split = eval-only`.
-2. Any row physically committed under this repo's `rows/` directory must **not**
-   have `provenance` in `{measured-live, dogfood}` — those rows belong in the
-   local-only root, never in the public repo.
+2. Any row physically committed under this repo's `rows/` directory must have
+   `provenance = synthetic-generated` — an allow-list, not a deny-list:
+   measured-live, dogfood, **and eval-import** rows all belong under the
+   local-only root, never in the public repo; this repo references them via
+   `manifest.json` hashes only.
 3. Rows sharing a `family_id` must all carry the same `split` value.
 
 These rules exist so that training never touches measured/customer-adjacent

@@ -43,12 +43,14 @@ schema, `manifest.json` for the eval-quarantine manifest). Governing PRD:
      text.
    - An externally sourced eval asset **imported wholesale** (e.g. a public
      PII benchmark corpus admitted per the base-mix protocol) gets
-     `provenance: eval-import`.
+     `provenance: eval-import` — stored under the LOCAL root and referenced
+     via `manifest.json`, never committed to this repo's `rows/` (which
+     accepts `synthetic-generated` rows only).
 
 4. **Run `validate.py` before committing anything.** It will hard-fail any
    row that violates the quarantine rules (train/dev + non-synthetic
-   provenance; in-repo + measured/dogfood provenance; a `family_id` split
-   across multiple `split` values).
+   provenance; any non-synthetic provenance inside this repo's `rows/`; a
+   `family_id` split across multiple `split` values; duplicate row ids).
 
 ## Org-scoping (three-tier design; schema only — no build here)
 

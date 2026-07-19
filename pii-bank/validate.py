@@ -7,19 +7,23 @@ Stdlib-only (no new deps). Implements:
       Unicode CODEPOINT indices (Python str indices) into text, and every
       span's REQUIRED 'surface' field must equal text[start:end]
   (b) quarantine enforcement (train/dev must be synthetic-generated;
-      in-repo rows must never be measured-live/dogfood; family_id rows
-      must all share one split)
+      in-repo rows/ accepts ONLY synthetic-generated provenance -- measured,
+      dogfood, AND eval-import content lives under the local root; family_id
+      rows must all share one split) + bank-wide duplicate row-id check
   (c) --check-manifest: recompute sha256 for 'local' manifest entries
       (WARN + skip if missing, FAIL on hash mismatch), verify 'repo' entries
       exist and match
-  (d) --contamination: normalized 8-gram overlap check between every
-      train/dev row and every readable eval-only asset referenced in the
-      manifest
+  (d) --contamination: NFKC+casefold-normalized 8-gram overlap check between
+      every train/dev row and the eval-only assets referenced in the manifest
+      ('local' AND 'repo' entries). FAIL-CLOSED: a missing/unreadable eval
+      asset FAILs, and zero loadable eval assets FAILs outright
   (e) path-hygiene guard, run in EVERY mode: manifest 'local' entries are
       recorded RELATIVE to a local root (env var PII_BANK_LOCAL_ROOT,
       default '~/Opus Advisor'); any path_or_ref embedding an absolute
-      personal home-directory path hard-fails -- this repo is PUBLIC and
-      home paths are a personal-info leak class
+      personal home-directory path or a URI scheme hard-fails -- this repo
+      is PUBLIC and home paths are a personal-info leak class
+  (f) duplicate JSON keys are rejected in rows and manifest parsing (silent
+      last-wins would let a second 'split' key shadow the first)
 
 Exit code 0 on a fully clean run, 1 if any FAIL was recorded.
 
@@ -35,6 +39,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -86,10 +91,24 @@ ALLOWED_SPAN_FIELDS = {"start", "end", "category", "expected", "surface"}
 
 CREATED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# provenance values that may NEVER appear inside this (public) repo's rows/
-FORBIDDEN_IN_REPO_PROVENANCE = {"measured-live", "dogfood"}
-# provenance values allowed to carry split in {train, dev}
+# The ONLY provenance permitted inside this (public) repo's rows/ AND the only
+# provenance allowed to carry split in {train, dev}. Everything else --
+# measured-live, dogfood, AND eval-import -- lives under the LOCAL root and is
+# referenced via the manifest (terra gate F1: eval-import previously slipped
+# through a deny-list naming only measured-live/dogfood).
 SYNTHETIC_PROVENANCE = "synthetic-generated"
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """json.loads object_pairs_hook: duplicate keys silently last-win by
+    default, letting a second 'split'/'provenance' key shadow the first
+    (terra gate F6; same class as the DSA over-redaction R1-F4 finding)."""
+    obj: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in obj:
+            raise ValueError(f"duplicate JSON key {k!r}")
+        obj[k] = v
+    return obj
 
 
 class Failure:
@@ -129,8 +148,8 @@ def parse_jsonl(path: Path) -> list[tuple[int, dict[str, Any] | None, str | None
         if not stripped:
             continue
         try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError as exc:
+            obj = json.loads(stripped, object_pairs_hook=_reject_duplicate_keys)
+        except ValueError as exc:  # JSONDecodeError + duplicate-key ValueError
             out.append((i, None, str(exc)))
             continue
         out.append((i, obj, None))
@@ -159,15 +178,22 @@ def validate_span(row_id: str, text: str, span: Any, idx: int) -> list[Failure]:
     text_len = len(text)
     start, end = span.get("start"), span.get("end")
     offsets_ok = True
-    if not isinstance(start, int) or not isinstance(end, int):
-        fails.append(Failure(scope, f"start/end must be int, got start={start!r} end={end!r}"))
+    # bool subclasses int -- True/False must not pass as offsets (terra F5)
+    start_is_int = isinstance(start, int) and not isinstance(start, bool)
+    end_is_int = isinstance(end, int) and not isinstance(end, bool)
+    if not start_is_int or not end_is_int:
+        fails.append(
+            Failure(scope, f"start/end must be int (bool is not a valid offset), got start={start!r} end={end!r}")
+        )
         offsets_ok = False
     else:
         if start < 0 or end < 0:
             fails.append(Failure(scope, f"negative offset: start={start} end={end}"))
             offsets_ok = False
-        if end < start:
-            fails.append(Failure(scope, f"end < start: start={start} end={end}"))
+        if end <= start:
+            fails.append(
+                Failure(scope, f"end must be > start (zero-width spans are invalid): start={start} end={end}")
+            )
             offsets_ok = False
         if start > text_len or end > text_len:
             fails.append(
@@ -188,8 +214,8 @@ def validate_span(row_id: str, text: str, span: Any, idx: int) -> list[Failure]:
             )
         )
     surface = span.get("surface")
-    if not isinstance(surface, str):
-        fails.append(Failure(scope, f"surface must be a string, got {surface!r}"))
+    if not isinstance(surface, str) or not surface:
+        fails.append(Failure(scope, f"surface must be a non-empty string, got {surface!r}"))
     elif offsets_ok:
         actual = text[start:end]
         if actual != surface:
@@ -316,15 +342,20 @@ def enforce_quarantine(
                 )
             )
 
-        # Rule 2: in-repo rows/ must never carry measured-live/dogfood provenance.
+        # Rule 2: in-repo rows/ accepts ONLY synthetic-generated rows.
         # ROWS_DIR is inside this (public) repo by construction -- every file
         # this function is called on for 'rows' data lives under rows/.
-        if provenance in FORBIDDEN_IN_REPO_PROVENANCE:
+        # An allow-list, not a deny-list: measured-live, dogfood, AND
+        # eval-import all belong under the LOCAL root, referenced via the
+        # manifest (terra F1: the old deny-list let eval-import through).
+        if provenance != SYNTHETIC_PROVENANCE:
             fails.append(
                 Failure(
                     scope,
                     f"quarantine violation: provenance={provenance!r} is forbidden inside "
-                    f"the public repo's rows/ directory (public repo = synthetic/tooling only)",
+                    f"the public repo's rows/ directory (rows/ accepts ONLY "
+                    f"provenance={SYNTHETIC_PROVENANCE!r}; measured/dogfood/eval-import "
+                    f"content lives under the local root, referenced via the manifest)",
                 )
             )
 
@@ -346,6 +377,29 @@ def enforce_quarantine(
                 )
             )
 
+    return fails
+
+
+def check_duplicate_ids(rows: list[tuple[dict[str, Any], int, str]]) -> list[Failure]:
+    """Bank-wide row-id uniqueness across ALL row files (terra F4: duplicate
+    ids were silently accepted, which would corrupt any id-keyed join or
+    dedup step downstream)."""
+    fails: list[Failure] = []
+    seen: dict[str, str] = {}
+    for row, line_no, source_file in rows:
+        rid = row.get("id")
+        if not isinstance(rid, str) or not rid:
+            continue  # schema validation already fails these rows
+        where = f"{source_file}:{line_no}"
+        if rid in seen:
+            fails.append(
+                Failure(
+                    f"id={rid}",
+                    f"duplicate row id {rid!r}: first defined at {seen[rid]}, defined again at {where}",
+                )
+            )
+        else:
+            seen[rid] = where
     return fails
 
 
@@ -390,6 +444,18 @@ def path_or_ref_hygiene_fails(scope: str, path_or_ref: str) -> list[Failure]:
         f"record 'local' entries relative to the local root "
         f"(env {LOCAL_ROOT_ENV_VAR}, default {DEFAULT_LOCAL_ROOT!r})"
     )
+    # URI schemes (file:, http:, ...) can smuggle absolute paths past the
+    # path-component checks below (terra F7 probe: a file: URI wrapping a
+    # user-home path). Manifest refs are plain paths -- fail-closed on any
+    # scheme rather than trying to parse them.
+    if "://" in path_or_ref:
+        fails.append(
+            Failure(
+                scope,
+                f"path_or_ref {path_or_ref!r} contains a URI scheme; manifest refs are "
+                f"plain paths only -- {hint}",
+            )
+        )
     parts = PurePosixPath(path_or_ref).parts
     if len(parts) >= 2 and parts[0] == "/" and parts[1] == "Users":
         fails.append(
@@ -416,8 +482,8 @@ def manifest_hygiene_only() -> list[Failure]:
     if not MANIFEST_PATH.is_file():
         return []
     try:
-        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except ValueError as exc:  # JSONDecodeError + duplicate-key ValueError
         return [Failure("manifest", f"manifest.json is not valid JSON: {exc}")]
     entries = manifest.get("entries", [])
     if not isinstance(entries, list):
@@ -438,8 +504,8 @@ def check_manifest() -> tuple[list[Failure], list[Warning_]]:
         return fails, warns
 
     try:
-        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except ValueError as exc:  # JSONDecodeError + duplicate-key ValueError
         fails.append(Failure("manifest", f"manifest.json is not valid JSON: {exc}"))
         return fails, warns
 
@@ -521,7 +587,12 @@ _WORD_RE = re.compile(r"\S+")
 
 
 def normalize_text(text: str) -> str:
-    return _WS_RE.sub(" ", text.strip().lower())
+    """NFKC-normalize + casefold BEFORE tokenizing (terra F3): NFD and NFC
+    encodings of the same text must collide (composed vs decomposed accents
+    otherwise share zero n-grams), and casefold makes German sharp-s match
+    its 'ss' expansion where plain lower() does not."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return _WS_RE.sub(" ", folded.strip())
 
 
 def ngrams(text: str, n: int = 8) -> set[str]:
@@ -532,37 +603,38 @@ def ngrams(text: str, n: int = 8) -> set[str]:
 
 
 def extract_eval_texts_from_asset(path: Path) -> list[str]:
-    """Best-effort text extraction from a manifest 'local'/'dsa-origin-main'
-    eval asset for contamination scanning. Supports .jsonl (looks for a
-    'text' or 'snippet' field per line) and falls back to raw file content
-    for anything else (e.g. .md, .json blobs)."""
+    """Text extraction from a manifest eval asset for contamination scanning.
+    Supports .jsonl (looks for a 'text' or 'snippet' field per line) and
+    falls back to raw file content for anything else (e.g. .md, .json blobs).
+    OSError propagates to the caller: the contamination mode is fail-closed
+    and must FAIL (not skip) an unreadable asset (terra F2)."""
     texts: list[str] = []
     if path.suffix == ".jsonl":
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    obj = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict):
-                    for key in ("text", "snippet"):
-                        val = obj.get(key)
-                        if isinstance(val, str) and val:
-                            texts.append(val)
-        except OSError:
-            pass
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                for key in ("text", "snippet"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val:
+                        texts.append(val)
     else:
-        try:
-            texts.append(path.read_text(encoding="utf-8"))
-        except OSError:
-            pass
+        texts.append(path.read_text(encoding="utf-8"))
     return texts
 
 
 def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]]) -> list[Failure]:
+    """FAIL-CLOSED (terra F2): unlike --check-manifest's WARN-skip, this mode
+    exists to vouch that train/dev rows do not overlap the eval sets -- it
+    cannot vouch for assets it cannot read. A missing or unreadable eval
+    asset FAILs, and an entirely empty eval index FAILs outright. Indexes
+    both 'local' and 'repo' entries (terra F8); 'dsa-origin-main' refs point
+    into another repo and are covered by their hash-identical local twins."""
     fails: list[Failure] = []
 
     if not MANIFEST_PATH.is_file():
@@ -570,29 +642,58 @@ def run_contamination_check(train_dev_rows: list[tuple[dict[str, Any], int, str]
         return fails
 
     try:
-        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except ValueError as exc:  # JSONDecodeError + duplicate-key ValueError
         fails.append(Failure("contamination", f"manifest.json is not valid JSON: {exc}"))
         return fails
 
-    eval_ngram_index: dict[str, set[str]] = {}  # asset path_or_ref -> ngrams
-    for entry in manifest.get("entries", []):
+    entries = manifest.get("entries", [])
+    if not isinstance(entries, list):
+        fails.append(Failure("contamination", "manifest.json 'entries' must be a list"))
+        return fails
+
+    eval_ngram_index: dict[str, set[str]] = {}  # resolved asset path -> ngrams
+    for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
-        if entry.get("location_class") != "local":
+        location_class = entry.get("location_class")
+        if location_class not in {"local", "repo"}:
             continue
+        scope = f"contamination manifest.entries[{i}]"
         raw_ref = entry.get("path_or_ref", "")
         if not isinstance(raw_ref, str) or not raw_ref:
+            fails.append(Failure(scope, "entry has no usable path_or_ref"))
             continue
-        p = resolve_local_ref(raw_ref)
+        p = resolve_local_ref(raw_ref) if location_class == "local" else (HERE / raw_ref)
         if not p.is_file():
+            fails.append(
+                Failure(scope, f"eval-only asset missing on disk -- contamination is fail-closed: {p}")
+            )
             continue
-        eval_texts = extract_eval_texts_from_asset(p)
+        try:
+            eval_texts = extract_eval_texts_from_asset(p)
+        except OSError as exc:
+            fails.append(
+                Failure(scope, f"eval-only asset unreadable -- contamination is fail-closed: {p}: {exc}")
+            )
+            continue
         combined_ngrams: set[str] = set()
         for t in eval_texts:
             combined_ngrams |= ngrams(t)
         if combined_ngrams:
             eval_ngram_index[str(p)] = combined_ngrams
+
+    if not eval_ngram_index:
+        fails.append(
+            Failure(
+                "contamination",
+                "zero loadable eval-only assets -- refusing to pass fail-open; "
+                "fix the manifest entries and/or the local root "
+                f"(env {LOCAL_ROOT_ENV_VAR}, default {DEFAULT_LOCAL_ROOT!r}) "
+                "before trusting train/dev rows",
+            )
+        )
+        return fails
 
     for row, line_no, source_file in train_dev_rows:
         if row.get("split") not in {"train", "dev"}:
@@ -665,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
 
     quarantine_fails = enforce_quarantine(all_parsed_rows)
     all_fails.extend(quarantine_fails)
+
+    all_fails.extend(check_duplicate_ids(all_parsed_rows))
 
     if args.check_manifest:
         manifest_fails, manifest_warns = check_manifest()

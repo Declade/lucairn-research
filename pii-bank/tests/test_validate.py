@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import sys
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -164,7 +165,33 @@ class TestSpanOutOfBounds:
             spans=[{"start": 5, "end": 2, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
         )
         fails = validate.validate_row(row, 1, "test.jsonl")
-        assert any("end < start" in str(f) for f in fails)
+        assert any("end must be > start" in str(f) for f in fails)
+
+    def test_zero_width_span_fails(self):
+        # terra F5: start == end previously passed (sliced "" == surface "")
+        row = make_valid_row(
+            text="short text",
+            spans=[{"start": 5, "end": 5, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("zero-width" in str(f) for f in fails)
+
+    def test_bool_offsets_fail(self):
+        # terra F5: bool subclasses int -- True previously passed as an offset
+        t = make_valid_row()["text"]
+        row = make_valid_row(
+            spans=[{"start": True, "end": 24, "category": "PERSON", "expected": "REDACT", "surface": t[1:24]}]
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("bool is not a valid offset" in str(f) for f in fails)
+
+    def test_empty_surface_fails(self):
+        # terra F5: surface must be a NON-EMPTY string
+        row = make_valid_row(
+            spans=[{"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT", "surface": ""}]
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("surface must be a non-empty string" in str(f) for f in fails)
 
     def test_span_not_a_dict_fails(self):
         row = make_valid_row(spans=["not-a-span-object"])
@@ -248,7 +275,7 @@ class TestSurfaceAndCodepointOffsets:
             spans=[{"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT", "surface": 42}]
         )
         fails = validate.validate_row(row, 1, "test.jsonl")
-        assert any("surface must be a string" in str(f) for f in fails)
+        assert any("surface must be a non-empty string" in str(f) for f in fails)
 
     def test_main_end_to_end_on_umlaut_rows(self, tmp_path, monkeypatch):
         manifest_path = tmp_path / "manifest.json"
@@ -321,6 +348,98 @@ class TestQuarantinePublicDogfood:
         row = make_valid_row(provenance="synthetic-generated")
         fails = validate.enforce_quarantine([(row, 1, "rows/synthetic-seed.jsonl")])
         assert fails == []
+
+    def test_public_repo_row_with_eval_import_provenance_fails(self):
+        # terra F1: the old deny-list named only measured-live/dogfood, so an
+        # eval-import row placed in repo rows/ passed -- the data-placement
+        # bypass. rows/ is an allow-list now: synthetic-generated ONLY.
+        row = make_valid_row(
+            split="eval-only",
+            provenance="eval-import",
+            consent_basis="public-corpus",
+            family_id="fam-evimport-1",
+        )
+        fails = validate.enforce_quarantine([(row, 1, "rows/synthetic-seed.jsonl")])
+        assert any("forbidden inside the public repo" in str(f) for f in fails)
+
+    def test_eval_import_in_repo_caught_end_to_end(self, tmp_path, monkeypatch):
+        # terra F1 e2e repro: main() must exit 1 on an eval-import row in rows/
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        row = make_valid_row(
+            id="evimport-row",
+            split="eval-only",
+            provenance="eval-import",
+            consent_basis="public-corpus",
+            family_id="fam-evimport-e2e",
+        )
+        (rows_dir / "ev.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps({"entries": []}), encoding="utf-8")
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+        assert validate.main([]) == 1
+
+
+class TestDuplicateRowIds:
+    def test_duplicate_id_across_files_fails(self):
+        # terra F4: duplicate ids were silently accepted bank-wide
+        row_a = make_valid_row(id="dup-id")
+        row_b = make_valid_row(id="dup-id", family_id="test-family-001")
+        fails = validate.check_duplicate_ids([(row_a, 1, "a.jsonl"), (row_b, 3, "b.jsonl")])
+        assert len(fails) == 1
+        msg = str(fails[0])
+        assert "duplicate row id" in msg and "a.jsonl:1" in msg and "b.jsonl:3" in msg
+
+    def test_unique_ids_pass(self):
+        row_a = make_valid_row(id="id-one")
+        row_b = make_valid_row(id="id-two")
+        assert validate.check_duplicate_ids([(row_a, 1, "a.jsonl"), (row_b, 2, "a.jsonl")]) == []
+
+    def test_duplicate_id_caught_end_to_end(self, tmp_path, monkeypatch):
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        (rows_dir / "dup.jsonl").write_text(
+            json.dumps(make_valid_row(id="dup-id")) + "\n" + json.dumps(make_valid_row(id="dup-id")) + "\n",
+            encoding="utf-8",
+        )
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps({"entries": []}), encoding="utf-8")
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+        assert validate.main([]) == 1
+
+
+class TestDuplicateJsonKeys:
+    def test_duplicate_key_in_rows_line_fails_parse(self, tmp_path):
+        # terra F6: json.loads silently last-wins on duplicate keys, letting a
+        # second 'split' key shadow the first (same class as DSA
+        # over-redaction R1-F4)
+        p = tmp_path / "dup-key.jsonl"
+        p.write_text('{"a": 1, "a": 2}\n', encoding="utf-8")
+        parsed = validate.parse_jsonl(p)
+        assert len(parsed) == 1
+        line_no, obj, parse_error = parsed[0]
+        assert obj is None
+        assert parse_error is not None and "duplicate JSON key" in parse_error
+
+    def test_duplicate_key_in_manifest_fails(self, tmp_path, monkeypatch):
+        mp = tmp_path / "manifest.json"
+        mp.write_text('{"entries": [], "entries": []}', encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        fails, _warns = validate.check_manifest()
+        assert any("duplicate JSON key" in str(f) for f in fails)
+
+    def test_duplicate_key_manifest_caught_in_default_mode(self, tmp_path, monkeypatch):
+        # manifest_hygiene_only (plain `validate.py` run) must also reject it
+        rows_dir = tmp_path / "rows"
+        rows_dir.mkdir()
+        (rows_dir / "ok.jsonl").write_text(json.dumps(make_valid_row()) + "\n", encoding="utf-8")
+        mp = tmp_path / "manifest.json"
+        mp.write_text('{"entries": [], "entries": []}', encoding="utf-8")
+        monkeypatch.setattr(validate, "ROWS_DIR", rows_dir)
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        assert validate.main([]) == 1
 
 
 class TestFamilySplitConsistency:
@@ -478,6 +597,18 @@ class TestManifestPathLeak:
         assert all("sha256 mismatch" not in str(f) for f in fails)
         assert warns == []
 
+    def test_uri_scheme_path_fails(self, tmp_path, monkeypatch):
+        # terra F7 exact probe: a file: URI wrapping a user-home path slipped
+        # past the path-component checks. Any URI scheme now FAILs outright.
+        # (Constructed so the repo-wide grep for the home-path class stays clean.)
+        uri_probe = "file://" + str(PurePosixPath("/", "Users", "synthetic-test-user", "leak.jsonl"))
+        fails = validate.path_or_ref_hygiene_fails("probe", uri_probe)
+        assert any("URI scheme" in str(f) for f in fails)
+
+    def test_uri_scheme_non_file_also_fails(self):
+        fails = validate.path_or_ref_hygiene_fails("probe", "https://example.com/corpus.jsonl")
+        assert any("URI scheme" in str(f) for f in fails)
+
 
 class TestLocalRootResolution:
     def test_relative_local_entry_resolves_against_env_root(self, tmp_path, monkeypatch):
@@ -618,6 +749,143 @@ class TestContamination:
         )
         fails = validate.run_contamination_check([(eval_row, 1, "test.jsonl")])
         assert fails == []
+
+
+class TestContaminationFailClosed:
+    # terra F2: with the local root absent, every asset silently skipped and
+    # an EMPTY eval index passed -- the check vouched for nothing.
+
+    def test_missing_local_root_fails(self, tmp_path, monkeypatch):
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": "specs/some-corpus.jsonl",
+                    "sha256": "a" * 64,
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "fail-closed probe",
+                }
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        monkeypatch.setenv("PII_BANK_LOCAL_ROOT", str(tmp_path / "definitely-absent-root"))
+        fails = validate.run_contamination_check([])
+        assert any("fail-closed" in str(f) for f in fails)
+        assert any("zero loadable" in str(f) for f in fails)
+
+    def test_zero_eval_assets_fails(self, tmp_path, monkeypatch):
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps({"entries": []}), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        fails = validate.run_contamination_check([])
+        assert any("zero loadable" in str(f) for f in fails)
+
+    def test_one_missing_one_present_still_fails_and_still_scans(self, tmp_path, monkeypatch):
+        shared = "the quick brown fox jumps over the lazy dog today"
+        present = tmp_path / "present.jsonl"
+        present.write_text(json.dumps({"text": shared}) + "\n", encoding="utf-8")
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": str(present),
+                    "sha256": "x",
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "present",
+                },
+                {
+                    "path_or_ref": str(tmp_path / "absent.jsonl"),
+                    "sha256": "x",
+                    "location_class": "local",
+                    "role": "eval-only",
+                    "note": "absent",
+                },
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        train_row = make_valid_row(id="overlap-row", text=shared)
+        fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
+        # the missing asset FAILs AND the present asset still catches the overlap
+        assert any("fail-closed" in str(f) for f in fails)
+        assert any("8-gram" in str(f) for f in fails)
+
+
+class TestContaminationUnicodeNormalization:
+    # terra F3: NFD and NFC encodings of the same text shared ZERO 8-grams,
+    # so a canonically-different copy of eval text evaded the check entirely.
+
+    NFC_SENTENCE = unicodedata.normalize(
+        "NFC", "café münchen besucht die alte bäckerei am marktplatz heute"
+    )
+    NFD_SENTENCE = unicodedata.normalize("NFD", NFC_SENTENCE)
+
+    def _manifest_for(self, tmp_path, eval_text):
+        asset = tmp_path / "eval.jsonl"
+        asset.write_text(json.dumps({"text": eval_text}, ensure_ascii=False) + "\n", encoding="utf-8")
+        mp = tmp_path / "manifest.json"
+        mp.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "path_or_ref": str(asset),
+                            "sha256": "x",
+                            "location_class": "local",
+                            "role": "eval-only",
+                            "note": "unicode probe",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return mp
+
+    def test_nfd_vs_nfc_now_collides(self, tmp_path, monkeypatch):
+        assert self.NFC_SENTENCE != self.NFD_SENTENCE  # probe only meaningful if raw forms differ
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_for(tmp_path, self.NFC_SENTENCE))
+        train_row = make_valid_row(id="nfd-row", lang="de", text=self.NFD_SENTENCE)
+        fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
+        assert any("8-gram" in str(f) for f in fails)
+
+    def test_sharp_s_vs_ss_now_collides(self, tmp_path, monkeypatch):
+        eval_text = "die alte straße war gesperrt für den verkehr heute"
+        train_text = "die alte STRASSE war gesperrt für den verkehr heute"
+        monkeypatch.setattr(validate, "MANIFEST_PATH", self._manifest_for(tmp_path, eval_text))
+        train_row = make_valid_row(id="ss-row", lang="de", text=train_text)
+        fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
+        assert any("8-gram" in str(f) for f in fails)
+
+
+class TestContaminationRepoEntries:
+    # terra F8 (advisory): 'repo' entries were invisible to contamination;
+    # S2 repo-resident eval assets must be covered from day one.
+
+    def test_repo_entry_indexed_and_catches_overlap(self, tmp_path, monkeypatch):
+        seed_line = json.loads(
+            (PII_BANK_DIR / "rows" / "synthetic-seed.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        manifest = {
+            "entries": [
+                {
+                    "path_or_ref": "rows/synthetic-seed.jsonl",
+                    "sha256": "x",
+                    "location_class": "repo",
+                    "role": "eval-only",
+                    "note": "repo-entry probe",
+                }
+            ]
+        }
+        mp = tmp_path / "manifest.json"
+        mp.write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", mp)
+        train_row = make_valid_row(id="repo-overlap-row", text=seed_line["text"])
+        fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
+        assert any("8-gram" in str(f) for f in fails)
 
 
 # ---------------------------------------------------------------------------
