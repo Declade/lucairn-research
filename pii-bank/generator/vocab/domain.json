@@ -1,0 +1,11 @@
+{
+  "vendors": ["Salesforce", "ServiceNow", "Workday", "Datadog", "Snowflake", "Atlassian"],
+  "aws_regions": ["eu-central-1", "eu-west-1", "us-east-2", "ap-southeast-2"],
+  "azure_regions": ["westeurope", "northeurope", "germanywestcentral", "eastus2"],
+  "roles": ["integration user", "service desk", "change advisory board", "release manager"],
+  "places": ["Lindenau", "Falkenried", "Morgenfeld", "Rosenhafen"],
+  "schema_keys": ["requested_for", "assignment_group", "change_window", "synthetic_reference"],
+  "ticket_prefixes": ["SYN", "DEMO", "LAB", "QA"],
+  "opaque_ids": ["qx7m2", "rv4k9", "na8t1", "pd6w3"],
+  "clean_identifiers": ["retry_policy_admin", "cache_reset_admin", "queue_router_admin", "schema_check_admin"]
+}
