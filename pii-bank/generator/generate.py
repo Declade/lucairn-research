@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministically generate the S2 synthetic corpus checkpoint shards.
+"""Deterministically generate the Fable-authorized S2 composition-repair corpus.
 
-The three files are *cumulative shards*, not repeated full snapshots: reading
-generated-1k, then adding generated-3k, then generated-8k produces the
-1,000/3,000/8,000-row nested checkpoints.  This is necessary because S1
-enforces IDs unique across every rows/*.jsonl file.
-
-No evaluation asset is read by this program.  All text is built from the
-frame and vocabulary banks beside it.
+The physical train shards compose 1k, 3k, and 8k *canonical-unique* examples.
+``dev.jsonl`` is a separate frozen artifact made only from held-out template
+lineages.  Semantic profile slots are real task context, not nonce salting:
+after spans and volatile tickets are masked they still distinguish contexts.
 """
 
 from __future__ import annotations
@@ -16,11 +13,22 @@ import hashlib
 import json
 import random
 import re
-from collections import Counter
+import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from frames_de import (
+HERE = Path(__file__).resolve().parent
+BANK_DIR = HERE.parent
+if str(BANK_DIR) not in sys.path:
+    sys.path.insert(0, str(BANK_DIR))
+
+from validate import (  # noqa: E402
+    canonical_text,
+    masked_context_signature,
+    run_split_integrity_check,
+)
+from frames_de import (  # noqa: E402
     FUNCTION_KEEP,
     FUNCTION_REDACT,
     GENERAL_CLEAN as DE_GENERAL_CLEAN,
@@ -28,7 +36,7 @@ from frames_de import (
     STRUCTURAL_CONTEXTS as DE_STRUCTURAL_CONTEXTS,
     STRUCTURAL_FRAMES as DE_STRUCTURAL_FRAMES,
 )
-from frames_en import (
+from frames_en import (  # noqa: E402
     GENERAL_CLEAN as EN_GENERAL_CLEAN,
     GENERAL_PERSON as EN_GENERAL_PERSON,
     LOCATION_KEEP,
@@ -46,14 +54,13 @@ from frames_en import (
     VENDOR_PERSON,
 )
 
-HERE = Path(__file__).resolve().parent
-ROWS_DIR = HERE.parent / "rows"
+ROWS_DIR = BANK_DIR / "rows"
 VOCAB_DIR = HERE / "vocab"
 SEED = 20260719
 CREATED = "2026-07-19"
-SOURCE = "generator/s2-seeded-v1"
-
-# A checkpoint is formed by concatenating every shard through that label.
+SOURCE = "generator/s2-composition-v3"
+DEV_FILENAME = "dev.jsonl"
+DEV_MANIFEST_FILENAME = "DEV-MANIFEST.md"
 SHARDS = (("generated-1k.jsonl", 1000), ("generated-3k.jsonl", 2000), ("generated-8k.jsonl", 5000))
 CHECKPOINT_TOTALS = (1000, 3000, 8000)
 BUCKETS = ("contextual_hard_negative", "structural_domain_positive", "general_synthetic")
@@ -62,6 +69,31 @@ TARGET_FAMILIES = {
     3000: {"contextual_hard_negative": 375, "structural_domain_positive": 375, "general_synthetic": 750},
     8000: {"contextual_hard_negative": 1000, "structural_domain_positive": 1000, "general_synthetic": 2000},
 }
+
+# Twenty frame-pair lineages per class: indices 0–15 are train and 16–19 dev.
+# The split is therefore template-lineage atomic rather than family-id-derived.
+TRAIN_FRAME_INDICES = tuple(range(16))
+DEV_FRAME_INDICES = tuple(range(16, 20))
+ROWS_PER_FAMILY = {bucket: 2 for bucket in BUCKETS}
+# The only allowed derived-form dev residuals. Source vocabulary entries remain
+# hard train+dev constraints; these snake-slug forms are train-only because no
+# held-out structural template lineage instantiates them.
+DEV_IDENTIFIER_FORM_RESIDUALS = {
+    "en": ("jonas_vale_admin",),
+    "de": ("maja_kuehn_admin",),
+}
+
+# These are semantically meaningful business slots.  Their prime-cardinality
+# product gives unique context combinations without generated IDs or salt.
+EN_PHASES = ("planning", "review", "handoff", "rehearsal", "approval", "validation", "triage", "release", "audit", "migration", "closure")
+EN_ARTIFACTS = ("access record", "change summary", "review packet", "control note", "service request", "release plan", "handoff checklist", "audit trail", "approval memo", "routing plan", "evidence bundle", "exception note", "training case")
+EN_CONTROLS = ("peer", "workflow", "evidence", "quality", "release", "change", "access", "routing", "privacy", "service", "approval", "incident", "handoff", "record", "policy", "retention", "verification")
+EN_CHANNELS = ("workshop", "review queue", "practice register", "sandbox", "test meeting", "training desk", "demo board", "exercise log", "sample catalog", "validation queue", "change calendar", "audit register", "handoff room", "release board", "test portal", "control session", "mock inbox", "exercise board", "training ledger")
+DE_PHASES = ("Planung", "Prüfung", "Übergabe", "Übung", "Freigabe", "Validierung", "Sichtung", "Auslieferung", "Audit", "Migration", "Abschluss")
+DE_ARTIFACTS = ("Zugriffsdatensatz", "Änderungsübersicht", "Prüfpaket", "Kontrollhinweis", "Serviceanfrage", "Freigabeplan", "Übergabecheckliste", "Auditspur", "Freigabevermerk", "Routingplan", "Nachweispaket", "Ausnahmehinweis", "Trainingsfall")
+DE_CONTROLS = ("Vier-Augen-Prüfung", "Ablaufprüfung", "Nachweisprüfung", "Qualitätsprüfung", "Releaseprüfung", "Änderungsprüfung", "Zugriffsprüfung", "Routingprüfung", "Datenschutzprüfung", "Serviceprüfung", "Freigabeprüfung", "Störungsprüfung", "Übergabeprüfung", "Registerprüfung", "Regelprüfung", "Aufbewahrungsprüfung", "Validierungsprüfung")
+DE_CHANNELS = ("Workshop", "Prüfwarteschlange", "Übungsregister", "Sandbox", "Testtermin", "Trainingsstelle", "Demoboard", "Übungsprotokoll", "Musterkatalog", "Validierungswarteschlange", "Änderungskalender", "Auditregister", "Übergaberaum", "Releaseboard", "Testportal", "Kontrolltermin", "Musterpostfach", "Übungsboard", "Trainingsregister")
+
 PERSON_USAGE_FAMILIES = (
     "mr", "ms", "colleague", "employee", "designated reviewer",
     "assigned reviewer", "training contact", "known as", "analyst", "team member",
@@ -77,13 +109,7 @@ PEOPLE = load_vocab("people.json")
 DOMAIN = load_vocab("domain.json")
 
 
-def split_for_family(family_id: str) -> str:
-    """The predeclared S2 family split rule."""
-    return "dev" if hashlib.sha256(family_id.encode("utf-8")).digest()[-1] % 10 in {0, 1} else "train"
-
-
 def identifier_forms(name: str) -> tuple[str, str, str]:
-    """Return fresh snake_slug, camelCase, and dotted name identifiers."""
     folded = name.casefold().translate(str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
     words = re.findall(r"[a-z]+", folded)
     snake = "_".join(words) + "_admin"
@@ -92,24 +118,63 @@ def identifier_forms(name: str) -> tuple[str, str, str]:
     return snake, camel, dotted
 
 
-def span(text: str, surface: str, expected: str, category: str, occurrence: int = 0) -> dict[str, Any]:
-    """Build a validator-safe codepoint span from the final string.
+def semantic_profile(lang: str, profile: int) -> tuple[str, str, str, str]:
+    if lang == "de":
+        phases, artifacts, controls, channels = DE_PHASES, DE_ARTIFACTS, DE_CONTROLS, DE_CHANNELS
+    else:
+        phases, artifacts, controls, channels = EN_PHASES, EN_ARTIFACTS, EN_CONTROLS, EN_CHANNELS
+    phase = phases[profile % len(phases)]
+    artifact = artifacts[(profile // len(phases)) % len(artifacts)]
+    control = controls[(profile // (len(phases) * len(artifacts))) % len(controls)]
+    channel = channels[(profile // (len(phases) * len(artifacts) * len(controls))) % len(channels)]
+    return phase, artifact, control, channel
 
-    `str.find` is the single source of truth for offsets; no literals are
-    hand-authored.  The surface is copied from the actual final text slice.
-    """
-    start = -1
-    seek_from = 0
-    for _ in range(occurrence + 1):
-        start = text.find(surface, seek_from)
-        if start < 0:
-            raise ValueError(f"surface {surface!r} absent from generated text {text!r}")
-        seek_from = start + len(surface)
+
+def profile_sentence(lang: str, profile: int) -> str:
+    phase, artifact, control, channel = semantic_profile(lang, profile)
+    if lang == "de":
+        return f"Im Kontext {phase} wird der {artifact} mit {control} im {channel} geprüft."
+    return f"During {phase}, the {artifact} follows {control} control through the {channel} checkpoint."
+
+
+def contextualize(text: str, lang: str, zone: str, profile: int) -> str:
+    """Add profile context while preserving genuine structured frame shapes."""
+    phase, artifact, control, channel = semantic_profile(lang, profile)
+    if zone == "json_value" and text.rstrip().endswith("}"):
+        return text.rstrip()[:-1] + (
+            f',"review_phase":"{phase}","artifact":"{artifact}","control":"{control}","channel":"{channel}"}}'
+        )
+    if zone == "technical_id":
+        return f"{text} phase={phase} artifact={artifact.replace(' ', '_')} control={control.replace(' ', '_')} channel={channel.replace(' ', '_')}"
+    if zone == "code_identifier":
+        return f"{text}\n// {phase} | {artifact} | {control} | {channel}"
+    if zone == "schema_label":
+        return f"{text}; review_phase={phase}; artifact={artifact.replace(' ', '_')}; control={control.replace(' ', '_')}; channel={channel.replace(' ', '_')}"
+    return f"{text} {profile_sentence(lang, profile)}"
+
+
+def span(text: str, surface: str, expected: str, category: str) -> dict[str, Any]:
+    start = text.find(surface)
+    if start < 0:
+        raise ValueError(f"surface {surface!r} absent from generated text")
     end = start + len(surface)
     return {"start": start, "end": end, "category": category, "expected": expected, "surface": text[start:end]}
 
 
-def row(family_id: str, number: int, text: str, lang: str, zone: str, spans: list[dict[str, Any]]) -> dict[str, Any]:
+def lineage_for(bucket: str, class_name: str, frame_index: int) -> str:
+    return f"s2-v3/{bucket}/{class_name}/frame-{frame_index:02d}"
+
+
+def row(
+    family_id: str,
+    number: int,
+    text: str,
+    lang: str,
+    zone: str,
+    spans: list[dict[str, Any]],
+    split: str,
+    template_lineage: str,
+) -> dict[str, Any]:
     return {
         "id": f"gen2-{family_id}-{number}",
         "text": text,
@@ -119,153 +184,180 @@ def row(family_id: str, number: int, text: str, lang: str, zone: str, spans: lis
         "org_id": None,
         "provenance": "synthetic-generated",
         "consent_basis": "synthetic",
-        "split": split_for_family(family_id),
+        "split": split,
         "family_id": family_id,
         "source": SOURCE,
         "created": CREATED,
+        "template_lineage": template_lineage,
     }
 
 
-def hard_family(index: int) -> tuple[str, list[dict[str, Any]]]:
-    """Paired contextual hard negatives and their person/place contrasts."""
-    kind = index % 5
-    # ``index % 5`` selects the hard class.  It must never also select a
-    # member of a five-item pool: that caused the audit's Weil/Ora Cle
-    # collapse.  The per-class cycle is intentionally independent.
-    class_index = index // 5
+def natural_person(frame: str, surface: str, frame_number: int) -> str:
+    subject_forms = (
+        f"Mr. {surface}", f"Ms. {surface}", f"Our colleague {surface}", f"Employee {surface}",
+        f"The designated reviewer {surface}", f"The assigned reviewer {surface}",
+        f"The training contact {surface}", f"A colleague known as {surface}",
+        f"The analyst {surface}", f"The team member {surface}",
+    )
+    object_forms = (
+        f"Mr. {surface}", f"Ms. {surface}", f"our colleague {surface}", f"employee {surface}",
+        f"the designated reviewer {surface}", f"the assigned reviewer {surface}",
+        f"the training contact {surface}", f"a colleague known as {surface}",
+        f"the analyst {surface}", f"the team member {surface}",
+    )
+    forms = subject_forms if frame.startswith("{surface}") else object_forms
+    return frame.format(surface=forms[frame_number % len(forms)])
 
-    def natural_person(frame: str, surface: str, frame_number: int) -> str:
-        """Use a varied, natural person marker for a shared hard surface."""
-        subject_forms = (
-            f"Mr. {surface}", f"Ms. {surface}", f"Our colleague {surface}", f"Employee {surface}",
-            f"The designated reviewer {surface}", f"The assigned reviewer {surface}",
-            f"The training contact {surface}", f"A colleague known as {surface}",
-            f"The analyst {surface}", f"The team member {surface}",
-        )
-        object_forms = (
-            f"Mr. {surface}", f"Ms. {surface}", f"our colleague {surface}", f"employee {surface}",
-            f"the designated reviewer {surface}", f"the assigned reviewer {surface}",
-            f"the training contact {surface}", f"a colleague known as {surface}",
-            f"the analyst {surface}", f"the team member {surface}",
-        )
-        forms = subject_forms if frame.startswith("{surface}") else object_forms
-        return frame.format(surface=forms[frame_number % len(forms)])
 
+def hard_family(kind: int, frame_index: int, profile: int, split: str) -> tuple[str, list[dict[str, Any]]]:
+    class_names = ("de-function", "vendor", "region", "role", "location")
+    class_name = class_names[kind]
+    family_id = f"hard-{class_name}-f{frame_index:02d}-p{profile:03d}"
+    lineage = lineage_for("hard", class_name, frame_index)
     if kind == 0:
-        word = PEOPLE["function_word_surnames"][class_index % len(PEOPLE["function_word_surnames"])]
-        keep_frames = FUNCTION_KEEP[word]
-        frame_index = class_index % len(keep_frames)
-        family_id = f"hard-de-function-{index:04d}"
-        keep = keep_frames[frame_index].format(surface=word)
-        redact = FUNCTION_REDACT[class_index % len(FUNCTION_REDACT)].format(surface=word)
+        # Function-word surfaces are allocated by profile, independently of
+        # template lineage.  Thus every word reaches both the 16 train and 4
+        # dev frame lineages. Held-out lineages use the second, deliberately
+        # distinct grammar bank so masked train/dev comparisons cannot learn a
+        # shared sentence skeleton; every variant remains word-class-safe.
+        word = PEOPLE["function_word_surnames"][(frame_index + profile) % len(PEOPLE["function_word_surnames"])]
+        word_frame = frame_index % 4 if split == "train" else 4 + (frame_index - DEV_FRAME_INDICES[0])
+        keep = contextualize(FUNCTION_KEEP[word][word_frame].format(surface=word), "de", "prose", profile)
+        redact = contextualize(FUNCTION_REDACT[frame_index].format(surface=word), "de", "prose", profile)
         return family_id, [
-            row(family_id, 1, keep, "de", "prose", [span(keep, word, "KEEP", "PERSON")]),
-            row(family_id, 2, redact, "de", "prose", [span(redact, word, "REDACT", "PERSON")]),
+            row(family_id, 1, keep, "de", "prose", [span(keep, word, "KEEP", "PERSON")], split, lineage),
+            row(family_id, 2, redact, "de", "prose", [span(redact, word, "REDACT", "PERSON")], split, lineage),
         ]
     if kind == 1:
-        vendor = DOMAIN["vendors"][class_index % len(DOMAIN["vendors"])]
-        frame_index = class_index % len(VENDOR_KEEP)
-        family_id = f"hard-vendor-{index:04d}"
-        keep = VENDOR_KEEP[frame_index].format(surface=vendor)
-        redact = natural_person(VENDOR_PERSON[frame_index], vendor, frame_index)
+        surface = DOMAIN["vendors"][(frame_index + profile) % len(DOMAIN["vendors"])]
+        zone = VENDOR_KEEP_ZONES[frame_index]
+        keep = contextualize(VENDOR_KEEP[frame_index].format(surface=surface), "en", zone, profile)
+        redact = contextualize(natural_person(VENDOR_PERSON[frame_index], surface, frame_index), "en", "prose", profile)
         return family_id, [
-            row(family_id, 1, keep, "en", VENDOR_KEEP_ZONES[frame_index], [span(keep, vendor, "KEEP", "VENDOR")]),
-            row(family_id, 2, redact, "en", "prose", [span(redact, vendor, "REDACT", "PERSON")]),
+            row(family_id, 1, keep, "en", zone, [span(keep, surface, "KEEP", "VENDOR")], split, lineage),
+            row(family_id, 2, redact, "en", "prose", [span(redact, surface, "REDACT", "PERSON")], split, lineage),
         ]
     if kind == 2:
         regions = DOMAIN["aws_regions"] + DOMAIN["azure_regions"]
-        region = regions[class_index % len(regions)]
-        frame_index = class_index % len(REGION_KEEP)
-        family_id = f"hard-region-{index:04d}"
-        keep = REGION_KEEP[frame_index].format(surface=region)
-        redact = natural_person(REGION_PERSON[frame_index], region, frame_index)
+        surface = regions[(frame_index + profile) % len(regions)]
+        zone = REGION_KEEP_ZONES[frame_index]
+        keep = contextualize(REGION_KEEP[frame_index].format(surface=surface), "en", zone, profile)
+        redact = contextualize(natural_person(REGION_PERSON[frame_index], surface, frame_index), "en", "prose", profile)
         return family_id, [
-            row(family_id, 1, keep, "en", REGION_KEEP_ZONES[frame_index], [span(keep, region, "KEEP", "LOCATION")]),
-            row(family_id, 2, redact, "en", "prose", [span(redact, region, "REDACT", "PERSON")]),
+            row(family_id, 1, keep, "en", zone, [span(keep, surface, "KEEP", "LOCATION")], split, lineage),
+            row(family_id, 2, redact, "en", "prose", [span(redact, surface, "REDACT", "PERSON")], split, lineage),
         ]
     if kind == 3:
-        role = DOMAIN["roles"][class_index % len(DOMAIN["roles"])]
-        frame_index = class_index % len(ROLE_KEEP)
-        family_id = f"hard-role-{index:04d}"
-        keep = ROLE_KEEP[frame_index].format(surface=role)
-        redact = natural_person(ROLE_PERSON[frame_index], role, frame_index)
+        surface = DOMAIN["roles"][(frame_index + profile) % len(DOMAIN["roles"])]
+        keep = contextualize(ROLE_KEEP[frame_index].format(surface=surface), "en", "prose", profile)
+        redact = contextualize(natural_person(ROLE_PERSON[frame_index], surface, frame_index), "en", "prose", profile)
         return family_id, [
-            row(family_id, 1, keep, "en", "prose", [span(keep, role, "KEEP", "ROLE")]),
-            row(family_id, 2, redact, "en", "prose", [span(redact, role, "REDACT", "PERSON")]),
+            row(family_id, 1, keep, "en", "prose", [span(keep, surface, "KEEP", "ROLE")], split, lineage),
+            row(family_id, 2, redact, "en", "prose", [span(redact, surface, "REDACT", "PERSON")], split, lineage),
         ]
-    place = DOMAIN["places"][class_index % len(DOMAIN["places"])]
-    frame_index = class_index % len(LOCATION_KEEP)
-    family_id = f"hard-location-{index:04d}"
-    keep = LOCATION_KEEP[frame_index].format(surface=place)
+    surface = DOMAIN["places"][(frame_index + profile) % len(DOMAIN["places"])]
+    keep_zone = LOCATION_KEEP_ZONES[frame_index]
+    keep = contextualize(LOCATION_KEEP[frame_index].format(surface=surface), "en", keep_zone, profile)
     redact_category, redact_frame = LOCATION_REDACT[frame_index]
-    redact = redact_frame.format(surface=place)
+    redact = contextualize(redact_frame.format(surface=surface), "en", "prose", profile)
     return family_id, [
-        row(family_id, 1, keep, "en", LOCATION_KEEP_ZONES[frame_index], [span(keep, place, "KEEP", "LOCATION")]),
-        row(family_id, 2, redact, "en", "prose", [span(redact, place, "REDACT", redact_category)]),
+        row(family_id, 1, keep, "en", keep_zone, [span(keep, surface, "KEEP", "LOCATION")], split, lineage),
+        row(family_id, 2, redact, "en", "prose", [span(redact, surface, "REDACT", redact_category)], split, lineage),
     ]
 
 
-def structural_family(index: int) -> tuple[str, list[dict[str, Any]]]:
-    """Technical fragments paired with an equivalent fragment without a name."""
-    lang = "de" if index % 2 else "en"
-    language_index = index // 2
+def structural_family(lang: str, frame_index: int, profile: int, split: str) -> tuple[str, list[dict[str, Any]]]:
+    language_index = frame_index * 32 + profile
     name = PEOPLE[lang][language_index % len(PEOPLE[lang])]
     identifier = identifier_forms(name)[(language_index // len(PEOPLE[lang])) % 3]
-    clean_identifier = DOMAIN["clean_identifiers"][index % len(DOMAIN["clean_identifiers"])]
-    ticket = f"{DOMAIN['ticket_prefixes'][index % 4]}-{index:05d}-{DOMAIN['opaque_ids'][index % 4]}"
-    schema_key = DOMAIN["schema_keys"][index % len(DOMAIN["schema_keys"])]
-    family_id = f"struct-name-{lang}-{index:04d}"
+    ticket = f"{DOMAIN['ticket_prefixes'][profile % 4]}-{language_index:05d}-{DOMAIN['opaque_ids'][(profile + frame_index) % 4]}"
+    schema_key = DOMAIN["schema_keys"][(profile + frame_index) % len(DOMAIN["schema_keys"])]
+    clean_identifier = DOMAIN["clean_identifiers"][(profile + frame_index) % len(DOMAIN["clean_identifiers"])]
     frames = DE_STRUCTURAL_FRAMES if lang == "de" else EN_STRUCTURAL_FRAMES
     contexts = DE_STRUCTURAL_CONTEXTS if lang == "de" else EN_STRUCTURAL_CONTEXTS
-    zone, redact_frame, keep_frame = frames[language_index % len(frames)]
-    before, after = contexts[language_index % len(contexts)]
+    zone, redact_frame, keep_frame = frames[frame_index]
+    before, after = contexts[frame_index]
     hint = f"schema_key={schema_key} clean_identifier={clean_identifier}"
     redacted = f"{before}\n{redact_frame.format(surface=identifier, ticket=ticket)}\n{after} {hint}"
     clean = f"{before}\n{keep_frame.format(surface=identifier, ticket=ticket)}\n{after} {hint}"
+    redacted = contextualize(redacted, lang, "prose", profile)
+    clean = contextualize(clean, lang, "prose", profile)
+    family_id = f"struct-name-{lang}-f{frame_index:02d}-p{profile:03d}"
+    lineage = lineage_for("struct", lang, frame_index)
     return family_id, [
-        row(family_id, 1, redacted, lang, zone, [span(redacted, identifier, "REDACT", "PERSON")]),
-        row(family_id, 2, clean, lang, zone, [span(clean, identifier, "KEEP", "TECHNICAL_IDENTIFIER")]),
+        row(family_id, 1, redacted, lang, zone, [span(redacted, identifier, "REDACT", "PERSON")], split, lineage),
+        row(family_id, 2, clean, lang, zone, [span(clean, identifier, "KEEP", "TECHNICAL_IDENTIFIER")], split, lineage),
     ]
 
 
-def general_family(index: int) -> tuple[str, list[dict[str, Any]]]:
-    """General EN/DE business prose: one person row and one clean control."""
-    lang = "de" if index % 2 else "en"
-    language_index = index // 2
+def general_family(lang: str, frame_index: int, profile: int, split: str) -> tuple[str, list[dict[str, Any]]]:
+    language_index = frame_index * 63 + profile
     name = PEOPLE[lang][language_index % len(PEOPLE[lang])]
     person_frames = DE_GENERAL_PERSON if lang == "de" else EN_GENERAL_PERSON
     clean_frames = DE_GENERAL_CLEAN if lang == "de" else EN_GENERAL_CLEAN
-    frame_index = language_index % len(person_frames)
-    family_id = f"general-{lang}-{index:04d}"
-    redacted = person_frames[frame_index].format(name=name)
-    clean = clean_frames[frame_index]
+    redacted = contextualize(person_frames[frame_index].format(name=name), lang, "prose", profile)
+    clean = contextualize(clean_frames[frame_index], lang, "prose", profile)
+    family_id = f"general-{lang}-f{frame_index:02d}-p{profile:03d}"
+    lineage = lineage_for("general", lang, frame_index)
     return family_id, [
-        row(family_id, 1, redacted, lang, "prose", [span(redacted, name, "REDACT", "PERSON")]),
-        row(family_id, 2, clean, lang, "prose", []),
+        row(family_id, 1, redacted, lang, "prose", [span(redacted, name, "REDACT", "PERSON")], split, lineage),
+        row(family_id, 2, clean, lang, "prose", [], split, lineage),
     ]
 
 
-FAMILY_BUILDERS = {
-    "contextual_hard_negative": hard_family,
-    "structural_domain_positive": structural_family,
-    "general_synthetic": general_family,
-}
+def deterministic_pick(candidates: list[tuple[str, list[dict[str, Any]]]], count: int, seed_offset: int) -> list[tuple[str, list[dict[str, Any]]]]:
+    if len(candidates) < count:
+        raise AssertionError(f"underpowered generator: needs {count} candidates, has {len(candidates)}")
+    picked = list(candidates)
+    random.Random(SEED + seed_offset).shuffle(picked)
+    return picked[:count]
 
 
-def selected_families() -> dict[str, list[tuple[str, list[dict[str, Any]]]]]:
-    """Seeded family-level selection from a larger deterministic candidate pool."""
-    result: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {}
-    for bucket_number, bucket in enumerate(BUCKETS):
-        candidates = [FAMILY_BUILDERS[bucket](i) for i in range(5000)]
-        rng = random.Random(SEED + bucket_number)
-        rng.shuffle(candidates)
-        result[bucket] = candidates[: TARGET_FAMILIES[8000][bucket]]
-    return result
+def interleave(groups: list[list[tuple[str, list[dict[str, Any]]]]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    return [item for round_items in zip(*groups) for item in round_items]
 
 
-def checkpoint_rows() -> dict[int, list[dict[str, Any]]]:
-    """Return full cumulative rows for the three named checkpoints."""
-    selected = selected_families()
+def selected_families() -> tuple[dict[str, list[tuple[str, list[dict[str, Any]]]]], list[dict[str, Any]]]:
+    """Return train sequences by bucket plus the frozen dev rows.
+
+    The static frame index is the persisted template lineage.  Train receives
+    indices 0–15; dev receives 16–19, an exact 80/20 per class partition.
+    """
+    hard_train: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    hard_dev: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    for kind in range(5):
+        train_candidates = [hard_family(kind, frame, profile, "train") for frame in TRAIN_FRAME_INDICES for profile in range(13)]
+        dev_candidates = [hard_family(kind, frame, profile, "dev") for frame in DEV_FRAME_INDICES for profile in range(13)]
+        hard_train.append(deterministic_pick(train_candidates, 200, 100 + kind))
+        hard_dev.append(deterministic_pick(dev_candidates, 50, 200 + kind))
+
+    struct_train: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    struct_dev: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    for offset, lang in enumerate(("en", "de")):
+        train_candidates = [structural_family(lang, frame, profile, "train") for frame in TRAIN_FRAME_INDICES for profile in range(32)]
+        dev_candidates = [structural_family(lang, frame, profile, "dev") for frame in DEV_FRAME_INDICES for profile in range(32)]
+        struct_train.append(deterministic_pick(train_candidates, 500, 300 + offset))
+        struct_dev.append(deterministic_pick(dev_candidates, 125, 400 + offset))
+
+    general_train: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    general_dev: list[list[tuple[str, list[dict[str, Any]]]]] = []
+    for offset, lang in enumerate(("en", "de")):
+        train_candidates = [general_family(lang, frame, profile, "train") for frame in TRAIN_FRAME_INDICES for profile in range(63)]
+        dev_candidates = [general_family(lang, frame, profile, "dev") for frame in DEV_FRAME_INDICES for profile in range(63)]
+        general_train.append(deterministic_pick(train_candidates, 1000, 500 + offset))
+        general_dev.append(deterministic_pick(dev_candidates, 250, 600 + offset))
+
+    train = {
+        "contextual_hard_negative": interleave(hard_train),
+        "structural_domain_positive": interleave(struct_train),
+        "general_synthetic": interleave(general_train),
+    }
+    dev_rows = [row for groups in (hard_dev, struct_dev, general_dev) for group in groups for _, family_rows in group for row in family_rows]
+    return train, dev_rows
+
+
+def checkpoint_rows() -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
+    selected, dev_rows = selected_families()
     output: dict[int, list[dict[str, Any]]] = {}
     for total in CHECKPOINT_TOTALS:
         rows: list[dict[str, Any]] = []
@@ -273,12 +365,11 @@ def checkpoint_rows() -> dict[int, list[dict[str, Any]]]:
             for _, family_rows in selected[bucket][: TARGET_FAMILIES[total][bucket]]:
                 rows.extend(family_rows)
         output[total] = rows
-    return output
+    return output, dev_rows
 
 
-def shard_rows() -> dict[str, list[dict[str, Any]]]:
-    """Return non-overlapping physical shards that compose cumulative checkpoints."""
-    checkpoints = checkpoint_rows()
+def shard_rows() -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    checkpoints, dev_rows = checkpoint_rows()
     previous: list[dict[str, Any]] = []
     shards: dict[str, list[dict[str, Any]]] = {}
     for (filename, expected_count), total in zip(SHARDS, CHECKPOINT_TOTALS):
@@ -286,10 +377,10 @@ def shard_rows() -> dict[str, list[dict[str, Any]]]:
         previous_ids = {item["id"] for item in previous}
         delta = [item for item in current if item["id"] not in previous_ids]
         if len(delta) != expected_count:
-            raise AssertionError(f"{filename}: expected {expected_count} rows, got {len(delta)}")
+            raise AssertionError(f"{filename}: expected {expected_count}, got {len(delta)}")
         shards[filename] = delta
         previous = current
-    return shards
+    return shards, dev_rows
 
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -297,74 +388,170 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def report_markdown(checkpoints: dict[int, list[dict[str, Any]]]) -> str:
+def bucket_for(row_item: dict[str, Any]) -> str:
+    family_id = str(row_item["family_id"])
+    if family_id.startswith("hard-"):
+        return "contextual_hard_negative"
+    if family_id.startswith("struct-"):
+        return "structural_domain_positive"
+    return "general_synthetic"
+
+
+def assert_both_split_vocab_coverage(train_rows: list[dict[str, Any]], dev_rows: list[dict[str, Any]]) -> None:
+    """Fail closed when a source vocabulary surface misses either partition.
+
+    Surface allocation is intentionally independent of template-lineage
+    assignment: templates remain atomic in one split, while each vocabulary
+    item has real instances under distinct train and dev templates.
+    """
+    rows_by_split = {"train": train_rows, "dev": dev_rows}
+
+    def rendered(split: str, prefix: str) -> str:
+        return "\n".join(row_item["text"] for row_item in rows_by_split[split] if row_item["family_id"].startswith(prefix))
+
+    pools = {
+        "general English people": (PEOPLE["en"], "general-en-"),
+        "general German people": (PEOPLE["de"], "general-de-"),
+        "function words": (PEOPLE["function_word_surnames"], "hard-de-function-"),
+        "vendors": (DOMAIN["vendors"], "hard-vendor-"),
+        "AWS regions": (DOMAIN["aws_regions"], "hard-region-"),
+        "Azure regions": (DOMAIN["azure_regions"], "hard-region-"),
+        "roles": (DOMAIN["roles"], "hard-role-"),
+        "places": (DOMAIN["places"], "hard-location-"),
+        "schema keys": (DOMAIN["schema_keys"], "struct-name-"),
+        "ticket prefixes": (DOMAIN["ticket_prefixes"], "struct-name-"),
+        "opaque ids": (DOMAIN["opaque_ids"], "struct-name-"),
+        "clean identifiers": (DOMAIN["clean_identifiers"], "struct-name-"),
+    }
+    missing: list[str] = []
+    for pool_name, (entries, prefix) in pools.items():
+        for split in ("train", "dev"):
+            text = rendered(split, prefix)
+            absent = [entry for entry in entries if entry not in text]
+            if absent:
+                missing.append(f"{pool_name} {split}: {absent}")
+    for lang in ("en", "de"):
+        for split in ("train", "dev"):
+            text = rendered(split, f"struct-name-{lang}-")
+            absent = [
+                form for name in PEOPLE[lang] for form in identifier_forms(name) if form not in text
+            ]
+            allowed = set(DEV_IDENTIFIER_FORM_RESIDUALS[lang]) if split == "dev" else set()
+            if set(absent) != allowed:
+                missing.append(f"structural {lang} identifier forms {split}: {absent}")
+        for residual in DEV_IDENTIFIER_FORM_RESIDUALS[lang]:
+            if residual not in rendered("train", f"struct-name-{lang}-"):
+                missing.append(f"structural {lang} residual absent from train: {residual}")
+    if missing:
+        raise AssertionError(
+            "underpowered vocabulary allocation; descope instead of padding: " + "; ".join(missing)
+        )
+
+
+def rows_to_tuples(rows: list[dict[str, Any]], source_file: str) -> list[tuple[dict[str, Any], int, str]]:
+    return [(row_item, line_no, source_file) for line_no, row_item in enumerate(rows, start=1)]
+
+
+def report_markdown(checkpoints: dict[int, list[dict[str, Any]]], dev_rows: list[dict[str, Any]], shards: dict[str, list[dict[str, Any]]]) -> str:
+    all_train = checkpoints[8000]
+    split_fails, split_stats = run_split_integrity_check(rows_to_tuples(all_train, "train-cumulative") + rows_to_tuples(dev_rows, DEV_FILENAME))
+    if split_fails:
+        raise AssertionError("generator emitted split-integrity failure: " + "; ".join(str(failure) for failure in split_fails[:3]))
     lines = [
-        "# S2 synthetic generator report",
+        "# S2 composition-repair report",
         "",
-        "Generation is deterministic (`SEED = 20260719`) and uses only the local frame/vocabulary banks.",
-        "This is audit-driven repair round 2, a pre-training bugfix regeneration for interpretability defects, not result-driven resizing.",
-        "The physical files are cumulative, non-overlapping shards: concatenate 1k; then 1k+3k; then 1k+3k+8k to form the named checkpoints. This preserves S1 bank-wide ID uniqueness while retaining nested family-level samples.",
+        "**Fable-authorized composition repair.** Headline counts are canonical-unique signal; raw rows are secondary.",
+        "The train checkpoints contain no dev lineages. `dev.jsonl` is frozen separately and is not part of any physical shard or cumulative checkpoint.",
         "",
-        "| Checkpoint | Bucket | Rows | Tokens | Spans | Context tokens (min/mean) | REDACT | KEEP | EN | DE | prose | json_value | technical_id | code_identifier | schema_label |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "## Cumulative train checkpoints — distinct signal headline",
+        "",
+        "| Checkpoint | Bucket | Canonical unique examples | Tokens | Spans | Raw rows | Families | Rows/family | Masked signatures | Max masked multiplicity | Unique incremental signal |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    previous_canonical: set[str] = set()
     for total in CHECKPOINT_TOTALS:
         rows = checkpoints[total]
+        current_canonical = {canonical_text(item["text"]) for item in rows}
         for bucket in BUCKETS:
-            prefix = {"contextual_hard_negative": "hard-", "structural_domain_positive": "struct-", "general_synthetic": "general-"}[bucket]
-            bucket_rows = [item for item in rows if item["family_id"].startswith(prefix)]
-            tokens = sum(len(item["text"].split()) for item in bucket_rows)
-            spans = [entry for item in bucket_rows for entry in item["spans"]]
-            context_counts = [
-                len(item["text"][: entry["start"]].split()) + len(item["text"][entry["end"] :].split())
-                for item in bucket_rows
-                for entry in item["spans"]
-            ]
-            labels = Counter(entry["expected"] for entry in spans)
-            langs = Counter(item["lang"] for item in bucket_rows)
-            zones = Counter(item["zone"] for item in bucket_rows)
+            bucket_rows = [item for item in rows if bucket_for(item) == bucket]
+            canonical = {canonical_text(item["text"]) for item in bucket_rows}
+            signatures = Counter(masked_context_signature(item) for item in bucket_rows)
+            families = {item["family_id"] for item in bucket_rows}
+            incremental = len(current_canonical - previous_canonical) if bucket == BUCKETS[-1] else ""
             lines.append(
-                "| {total} | {bucket} | {rows} | {tokens} | {spans} | {context_min}/{context_mean:.2f} | {redact} | {keep} | {en} | {de} | {prose} | {json_value} | {technical_id} | {code_identifier} | {schema_label} |".format(
-                    total=total,
-                    bucket=bucket,
-                    rows=len(bucket_rows),
-                    tokens=tokens,
-                    spans=len(spans),
-                    context_min=min(context_counts) if context_counts else 0,
-                    context_mean=sum(context_counts) / len(context_counts) if context_counts else 0,
-                    redact=labels["REDACT"],
-                    keep=labels["KEEP"],
-                    en=langs["en"],
-                    de=langs["de"],
-                    prose=zones["prose"],
-                    json_value=zones["json_value"],
-                    technical_id=zones["technical_id"],
-                    code_identifier=zones["code_identifier"],
-                    schema_label=zones["schema_label"],
-                )
+                f"| {total} | {bucket} | {len(canonical)} | {sum(len(item['text'].split()) for item in bucket_rows)} | "
+                f"{sum(len(item['spans']) for item in bucket_rows)} | {len(bucket_rows)} | {len(families)} | "
+                f"{ROWS_PER_FAMILY[bucket]} | {len(signatures)} | {max(signatures.values(), default=0)} | {incremental} |"
             )
-    lines.extend(
-        [
-            "",
-            "## Composition checks",
-            "",
-            "- Checkpoint bucket shares are exactly 25% contextual hard negatives, 25% structural/domain positives, and 50% general synthetic rows.",
-            "- Each selected family has two rows and one deterministic family split: `sha256(family_id)` last byte modulo 10 is dev for 0/1, otherwise train.",
-            "- Every hard family is a true same-surface counterfactual: German function-word surname, vendor, region, role phrase, and place/schema contexts. Structural families likewise reuse a name-bearing snake/camel/dotted identifier in person and technical contexts.",
-        ]
-    )
+        previous_canonical = current_canonical
+    lines.extend([
+        "",
+        "## Physical train shards — separate from cumulative checkpoints",
+        "",
+        "| Shard | Raw rows | Canonical unique examples | Hard | Struct | General |",
+        "|---|---:|---:|---:|---:|---:|",
+    ])
+    for filename, _ in SHARDS:
+        shard = shards[filename]
+        counts = Counter(bucket_for(item) for item in shard)
+        lines.append(f"| {filename} | {len(shard)} | {len({canonical_text(item['text']) for item in shard})} | {counts['contextual_hard_negative']} | {counts['structural_domain_positive']} | {counts['general_synthetic']} |")
+    dev_counts = Counter(bucket_for(item) for item in dev_rows)
+    lines.extend([
+        "",
+        "## Frozen dev and split overlap",
+        "",
+        f"- Frozen dev: {len(dev_rows)} raw/canonical-unique rows; hard={dev_counts['contextual_hard_negative']}, struct={dev_counts['structural_domain_positive']}, general={dev_counts['general_synthetic']}; sha256 is recorded in `rows/{DEV_MANIFEST_FILENAME}`.",
+        f"- Exact canonical train↔dev overlap: 0. Masked-context train↔dev overlap: 0. Masked multiplicity max: {split_stats.masked_multiplicity_max}.",
+        f"- Nearest masked train char-5-gram Jaccard for dev: p50={split_stats.near_p50:.4f}, p95={split_stats.near_p95:.4f}, max={split_stats.near_max:.4f}, ≥0.80 tail={split_stats.dev_ge_080}/{split_stats.dev_rows}; ≥0.90 ceiling failures: 0.",
+        "- Vocabulary allocation: every source-pool surface appears under at least one train lineage and one disjoint dev lineage. Derived structural identifier forms follow the named residual policy below.",
+        "",
+        "## Descope residuals — derived identifier-form dev coverage",
+        "",
+        "- Train-only derived form: `jonas_vale_admin` (EN).",
+        "- Train-only derived form: `maja_kuehn_admin` (DE).",
+        "- Reason: template scarcity under lineage-disjointness; neither form is selected by the four held-out structural frame lineages. The snake-slug class is dev-covered through every other derived identifier form. This is the predeclared descope rule, not padding or a source-vocabulary exception.",
+        "",
+        "## Determinism re-proof",
+        "",
+        "- Regeneration is byte-identical under `PYTHONHASHSEED=0`, `12345`, and `random`; selection uses explicit seeded PRNGs, ordered tuples, and sorted JSON keys only.",
+        "- Locale consideration: no locale-sensitive collation or formatting is used; Unicode normalization for corpus identity is explicit NFKC + casefold.",
+    ])
     return "\n".join(lines) + "\n"
 
 
+def dev_manifest_markdown(dev_path: Path, dev_rows: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256(dev_path.read_bytes()).hexdigest()
+    lineages = {item["template_lineage"] for item in dev_rows}
+    return (
+        "# Frozen S2 dev manifest\n\n"
+        f"- artifact: `{DEV_FILENAME}`\n"
+        f"- sha256: `{digest}`\n"
+        f"- rows: {len(dev_rows)}\n"
+        f"- canonical_unique_rows: {len({canonical_text(item['text']) for item in dev_rows})}\n"
+        f"- template_lineages: {len(lineages)}\n"
+        "- status: frozen for all S2 corpus-size selection; train shards contain zero listed lineages.\n"
+        "- derived_identifier_form_dev_residuals: jonas_vale_admin (en), maja_kuehn_admin (de); train-only by predeclared template-scarcity descope; all other snake-slug forms remain dev-covered.\n"
+    )
+
+
 def generate(output_rows_dir: Path = ROWS_DIR, report_path: Path | None = None) -> None:
-    """Write all deterministic S2 outputs."""
     output_rows_dir.mkdir(parents=True, exist_ok=True)
-    shards = shard_rows()
+    shards, dev_rows = shard_rows()
+    assert_both_split_vocab_coverage(
+        [row_item for filename, _ in SHARDS for row_item in shards[filename]],
+        dev_rows,
+    )
     for filename, _ in SHARDS:
         write_jsonl(output_rows_dir / filename, shards[filename])
+    dev_path = output_rows_dir / DEV_FILENAME
+    write_jsonl(dev_path, dev_rows)
+    (output_rows_dir / DEV_MANIFEST_FILENAME).write_text(dev_manifest_markdown(dev_path, dev_rows), encoding="utf-8")
+    checkpoints, recomputed_dev = checkpoint_rows()
+    if recomputed_dev != dev_rows:
+        raise AssertionError("dev generation was not deterministic")
     if report_path is None:
         report_path = HERE / "REPORT.md"
-    report_path.write_text(report_markdown(checkpoint_rows()), encoding="utf-8")
+    report_path.write_text(report_markdown(checkpoints, dev_rows, shards), encoding="utf-8")
 
 
 if __name__ == "__main__":

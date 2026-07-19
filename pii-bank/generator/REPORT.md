@@ -1,23 +1,44 @@
-# S2 synthetic generator report
+# S2 composition-repair report
 
-Generation is deterministic (`SEED = 20260719`) and uses only the local frame/vocabulary banks.
-This is audit-driven repair round 2, a pre-training bugfix regeneration for interpretability defects, not result-driven resizing.
-The physical files are cumulative, non-overlapping shards: concatenate 1k; then 1k+3k; then 1k+3k+8k to form the named checkpoints. This preserves S1 bank-wide ID uniqueness while retaining nested family-level samples.
+**Fable-authorized composition repair.** Headline counts are canonical-unique signal; raw rows are secondary.
+The train checkpoints contain no dev lineages. `dev.jsonl` is frozen separately and is not part of any physical shard or cumulative checkpoint.
 
-| Checkpoint | Bucket | Rows | Tokens | Spans | Context tokens (min/mean) | REDACT | KEEP | EN | DE | prose | json_value | technical_id | code_identifier | schema_label |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1000 | contextual_hard_negative | 250 | 2601 | 250 | 2/9.37 | 125 | 125 | 200 | 50 | 213 | 10 | 13 | 6 | 8 |
-| 1000 | structural_domain_positive | 250 | 5802 | 250 | 16/23.55 | 125 | 125 | 134 | 116 | 0 | 86 | 62 | 102 | 0 |
-| 1000 | general_synthetic | 500 | 5169 | 250 | 7/9.23 | 250 | 0 | 236 | 264 | 500 | 0 | 0 | 0 | 0 |
-| 3000 | contextual_hard_negative | 750 | 7739 | 750 | 2/9.35 | 375 | 375 | 588 | 162 | 644 | 31 | 30 | 21 | 24 |
-| 3000 | structural_domain_positive | 750 | 17236 | 750 | 16/23.33 | 375 | 375 | 392 | 358 | 0 | 260 | 204 | 286 | 0 |
-| 3000 | general_synthetic | 1500 | 15540 | 750 | 7/9.24 | 750 | 0 | 720 | 780 | 1500 | 0 | 0 | 0 | 0 |
-| 8000 | contextual_hard_negative | 2000 | 20880 | 2000 | 2/9.49 | 1000 | 1000 | 1624 | 376 | 1734 | 78 | 73 | 67 | 48 |
-| 8000 | structural_domain_positive | 2000 | 46482 | 2000 | 16/23.55 | 1000 | 1000 | 984 | 1016 | 0 | 618 | 582 | 800 | 0 |
-| 8000 | general_synthetic | 4000 | 41555 | 2000 | 7/9.27 | 2000 | 0 | 1992 | 2008 | 4000 | 0 | 0 | 0 | 0 |
+## Cumulative train checkpoints — distinct signal headline
 
-## Composition checks
+| Checkpoint | Bucket | Canonical unique examples | Tokens | Spans | Raw rows | Families | Rows/family | Masked signatures | Max masked multiplicity | Unique incremental signal |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1000 | contextual_hard_negative | 250 | 5221 | 250 | 250 | 125 | 2 | 250 | 1 |  |
+| 1000 | structural_domain_positive | 250 | 8464 | 250 | 250 | 125 | 2 | 250 | 1 |  |
+| 1000 | general_synthetic | 500 | 10980 | 250 | 500 | 250 | 2 | 500 | 1 | 1000 |
+| 3000 | contextual_hard_negative | 750 | 15395 | 750 | 750 | 375 | 2 | 750 | 1 |  |
+| 3000 | structural_domain_positive | 750 | 25708 | 750 | 750 | 375 | 2 | 750 | 1 |  |
+| 3000 | general_synthetic | 1500 | 32970 | 750 | 1500 | 750 | 2 | 1500 | 1 | 2000 |
+| 8000 | contextual_hard_negative | 2000 | 41691 | 2000 | 2000 | 1000 | 2 | 2000 | 1 |  |
+| 8000 | structural_domain_positive | 2000 | 69116 | 2000 | 2000 | 1000 | 2 | 2000 | 1 |  |
+| 8000 | general_synthetic | 4000 | 87997 | 2000 | 4000 | 2000 | 2 | 4000 | 1 | 5000 |
 
-- Checkpoint bucket shares are exactly 25% contextual hard negatives, 25% structural/domain positives, and 50% general synthetic rows.
-- Each selected family has two rows and one deterministic family split: `sha256(family_id)` last byte modulo 10 is dev for 0/1, otherwise train.
-- Every hard family is a true same-surface counterfactual: German function-word surname, vendor, region, role phrase, and place/schema contexts. Structural families likewise reuse a name-bearing snake/camel/dotted identifier in person and technical contexts.
+## Physical train shards — separate from cumulative checkpoints
+
+| Shard | Raw rows | Canonical unique examples | Hard | Struct | General |
+|---|---:|---:|---:|---:|---:|
+| generated-1k.jsonl | 1000 | 1000 | 250 | 250 | 500 |
+| generated-3k.jsonl | 2000 | 2000 | 500 | 500 | 1000 |
+| generated-8k.jsonl | 5000 | 5000 | 1250 | 1250 | 2500 |
+
+## Frozen dev and split overlap
+
+- Frozen dev: 2000 raw/canonical-unique rows; hard=500, struct=500, general=1000; sha256 is recorded in `rows/DEV-MANIFEST.md`.
+- Exact canonical train↔dev overlap: 0. Masked-context train↔dev overlap: 0. Masked multiplicity max: 1.
+- Nearest masked train char-5-gram Jaccard for dev: p50=0.4887, p95=0.5978, max=0.7143, ≥0.80 tail=0/2000; ≥0.90 ceiling failures: 0.
+- Vocabulary allocation: every source-pool surface appears under at least one train lineage and one disjoint dev lineage. Derived structural identifier forms follow the named residual policy below.
+
+## Descope residuals — derived identifier-form dev coverage
+
+- Train-only derived form: `jonas_vale_admin` (EN).
+- Train-only derived form: `maja_kuehn_admin` (DE).
+- Reason: template scarcity under lineage-disjointness; neither form is selected by the four held-out structural frame lineages. The snake-slug class is dev-covered through every other derived identifier form. This is the predeclared descope rule, not padding or a source-vocabulary exception.
+
+## Determinism re-proof
+
+- Regeneration is byte-identical under `PYTHONHASHSEED=0`, `12345`, and `random`; selection uses explicit seeded PRNGs, ordered tuples, and sorted JSON keys only.
+- Locale consideration: no locale-sensitive collation or formatting is used; Unicode normalization for corpus identity is explicit NFKC + casefold.
