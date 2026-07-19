@@ -110,10 +110,17 @@ def test_masked_diversity_and_general_rendered_content_guard():
 
 
 def test_general_clean_controls_are_span_free_and_name_free():
+    # Clean controls are identified STRUCTURALLY (variant -2 of every general
+    # family, per general_family() in generate.py) — NOT by `not row["spans"]`,
+    # which self-gated the old test: a clean control that wrongly acquired a
+    # span was silently skipped instead of failing.
     names = tuple(validator.canonical_text(name) for lang in ("en", "de") for name in generator.PEOPLE[lang])
-    for row in all_rows():
-        if row["family_id"].startswith("general-") and not row["spans"]:
-            assert not any(name in validator.canonical_text(row["text"]) for name in names), row["id"]
+    general = [row for row in all_rows() if row["family_id"].startswith("general-")]
+    clean_controls = [row for row in general if row["id"].endswith("-2")]
+    assert len(clean_controls) == len({row["family_id"] for row in general})
+    for row in clean_controls:
+        assert row["spans"] == [], row["id"]
+        assert not any(name in validator.canonical_text(row["text"]) for name in names), row["id"]
 
 
 def test_lineage_is_exclusive_atomic_and_partitioned_80_20_per_class():
@@ -277,9 +284,31 @@ def test_frozen_dev_manifest_and_report_headline_are_current():
     manifest = (PII_BANK_DIR / "rows" / generator.DEV_MANIFEST_FILENAME).read_text(encoding="utf-8")
     digest = hashlib.sha256((PII_BANK_DIR / "rows" / generator.DEV_FILENAME).read_bytes()).hexdigest()
     assert f"sha256: `{digest}`" in manifest
+    assert "## Power-floor obligation" in manifest
+    assert (
+        "S3 MUST freeze numeric minimum case/span floors BEFORE training and verify this dev satisfies them; "
+        "a dev below floor ⇒ the affected bar reports INCONCLUSIVE (never silently NO-GO) per PRD § Success criteria."
+    ) in manifest
+    computed: Counter[tuple[str, str, str]] = Counter()
+    computed_spans: Counter[tuple[str, str, str]] = Counter()
+    for row in dev_rows():
+        family_id = row["family_id"]
+        bucket = generator.bucket_for(row)
+        if family_id.startswith("hard-"):
+            class_name = family_id.split("-f", 1)[0].removeprefix("hard-")
+        elif family_id.startswith("struct-"):
+            class_name = "name-in-technical-zone"
+        else:
+            class_name = "general-person-clean-control"
+        key = (bucket, class_name, row["lang"])
+        computed[key] += 1
+        computed_spans[key] += len(row["spans"])
+    for (bucket, class_name, lang), rows in computed.items():
+        assert f"| {bucket} | {class_name} | {lang} | {rows} | {computed_spans[(bucket, class_name, lang)]} |" in manifest
     report = (GENERATOR_DIR / "REPORT.md").read_text(encoding="utf-8")
     for required in ("Fable-authorized composition repair", "Canonical unique examples", "Masked signatures", "Nearest masked train char-5-gram Jaccard", "Physical train shards", "PYTHONHASHSEED=0`, `12345`, and `random`"):
         assert required in report
+    assert "Power-floor obligation" in report
 
 
 @pytest.mark.parametrize("total", generator.CHECKPOINT_TOTALS)

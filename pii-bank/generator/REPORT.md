@@ -31,6 +31,7 @@ The train checkpoints contain no dev lineages. `dev.jsonl` is frozen separately 
 - Exact canonical train↔dev overlap: 0. Masked-context train↔dev overlap: 0. Masked multiplicity max: 1.
 - Nearest masked train char-5-gram Jaccard for dev: p50=0.4887, p95=0.5978, max=0.7143, ≥0.80 tail=0/2000; ≥0.90 ceiling failures: 0.
 - Vocabulary allocation: every source-pool surface appears under at least one train lineage and one disjoint dev lineage. Derived structural identifier forms follow the named residual policy below.
+- Power-floor obligation: `rows/DEV-MANIFEST.md` records the per-bucket/class/lang dev row+span evidence S3 must compare with frozen numeric floors before training; below-floor bars are INCONCLUSIVE, never silently NO-GO (PRD § Success criteria).
 
 ## Descope residuals — derived identifier-form dev coverage
 

@@ -397,6 +397,30 @@ def bucket_for(row_item: dict[str, Any]) -> str:
     return "general_synthetic"
 
 
+def dev_power_floor_counts(dev_rows: list[dict[str, Any]]) -> list[tuple[str, str, str, int, int]]:
+    """Compute the frozen-dev evidence S3 must compare to its numeric floors."""
+    counts: dict[tuple[str, str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for row_item in dev_rows:
+        family_id = row_item["family_id"]
+        bucket = bucket_for(row_item)
+        if family_id.startswith("hard-"):
+            class_name = family_id.split("-f", 1)[0].removeprefix("hard-")
+        elif family_id.startswith("struct-"):
+            class_name = "name-in-technical-zone"
+        else:
+            class_name = "general-person-clean-control"
+        key = (bucket, class_name, row_item["lang"])
+        counts[key][0] += 1
+        counts[key][1] += len(row_item["spans"])
+    bucket_order = {bucket: index for index, bucket in enumerate(BUCKETS)}
+    return [
+        (bucket, class_name, lang, values[0], values[1])
+        for (bucket, class_name, lang), values in sorted(
+            counts.items(), key=lambda item: (bucket_order[item[0][0]], item[0][1], item[0][2])
+        )
+    ]
+
+
 def assert_both_split_vocab_coverage(train_rows: list[dict[str, Any]], dev_rows: list[dict[str, Any]]) -> None:
     """Fail closed when a source vocabulary surface misses either partition.
 
@@ -504,6 +528,7 @@ def report_markdown(checkpoints: dict[int, list[dict[str, Any]]], dev_rows: list
         f"- Exact canonical train↔dev overlap: 0. Masked-context train↔dev overlap: 0. Masked multiplicity max: {split_stats.masked_multiplicity_max}.",
         f"- Nearest masked train char-5-gram Jaccard for dev: p50={split_stats.near_p50:.4f}, p95={split_stats.near_p95:.4f}, max={split_stats.near_max:.4f}, ≥0.80 tail={split_stats.dev_ge_080}/{split_stats.dev_rows}; ≥0.90 ceiling failures: 0.",
         "- Vocabulary allocation: every source-pool surface appears under at least one train lineage and one disjoint dev lineage. Derived structural identifier forms follow the named residual policy below.",
+        "- Power-floor obligation: `rows/DEV-MANIFEST.md` records the per-bucket/class/lang dev row+span evidence S3 must compare with frozen numeric floors before training; below-floor bars are INCONCLUSIVE, never silently NO-GO (PRD § Success criteria).",
         "",
         "## Descope residuals — derived identifier-form dev coverage",
         "",
@@ -522,6 +547,10 @@ def report_markdown(checkpoints: dict[int, list[dict[str, Any]]], dev_rows: list
 def dev_manifest_markdown(dev_path: Path, dev_rows: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256(dev_path.read_bytes()).hexdigest()
     lineages = {item["template_lineage"] for item in dev_rows}
+    power_floor_table = "\n".join(
+        f"| {bucket} | {class_name} | {lang} | {rows} | {spans} |"
+        for bucket, class_name, lang, rows, spans in dev_power_floor_counts(dev_rows)
+    )
     return (
         "# Frozen S2 dev manifest\n\n"
         f"- artifact: `{DEV_FILENAME}`\n"
@@ -531,6 +560,11 @@ def dev_manifest_markdown(dev_path: Path, dev_rows: list[dict[str, Any]]) -> str
         f"- template_lineages: {len(lineages)}\n"
         "- status: frozen for all S2 corpus-size selection; train shards contain zero listed lineages.\n"
         "- derived_identifier_form_dev_residuals: jonas_vale_admin (en), maja_kuehn_admin (de); train-only by predeclared template-scarcity descope; all other snake-slug forms remain dev-covered.\n"
+        "\n## Power-floor obligation\n\n"
+        "| Bucket | Class | Lang | Dev rows | Dev spans |\n"
+        "|---|---|---|---:|---:|\n"
+        f"{power_floor_table}\n\n"
+        "S3 MUST freeze numeric minimum case/span floors BEFORE training and verify this dev satisfies them; a dev below floor ⇒ the affected bar reports INCONCLUSIVE (never silently NO-GO) per PRD § Success criteria.\n"
     )
 
 
