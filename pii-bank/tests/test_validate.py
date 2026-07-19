@@ -47,6 +47,7 @@ def make_valid_row(**overrides) -> dict:
         "consent_basis": "synthetic",
         "split": "train",
         "family_id": "test-family-001",
+        "template_lineage": "test-lineage-001",
         "source": "unit test",
         "created": "2026-07-19",
     }
@@ -1047,6 +1048,47 @@ class TestContaminationRepoEntries:
         train_row = make_valid_row(id="repo-overlap-row", text=seed_line["text"])
         fails = validate.run_contamination_check([(train_row, 1, "t.jsonl")])
         assert any("8-gram" in str(f) for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# split integrity: emitted text, never family-id bookkeeping alone
+# ---------------------------------------------------------------------------
+
+
+class TestSplitIntegrity:
+    @staticmethod
+    def _entry(row: dict, line: int = 1):
+        return (row, line, "test.jsonl")
+
+    def test_canonical_train_dev_overlap_fails(self):
+        train = make_valid_row(id="train-canonical", family_id="family-train", template_lineage="lineage-train")
+        dev = make_valid_row(id="dev-canonical", split="dev", family_id="family-dev", template_lineage="lineage-dev")
+        fails, _ = validate.run_split_integrity_check([self._entry(train), self._entry(dev, 2)])
+        assert any("canonical train↔dev overlap" in str(failure) for failure in fails)
+
+    def test_masked_context_cross_split_fails_without_canonical_overlap(self):
+        train = make_valid_row(
+            id="train-masked", text="Review Avery today.", family_id="family-train", template_lineage="lineage-train",
+            spans=[{"start": 7, "end": 12, "category": "PERSON", "expected": "REDACT", "surface": "Avery"}],
+        )
+        dev = make_valid_row(
+            id="dev-masked", text="Review Mira today.", split="dev", family_id="family-dev", template_lineage="lineage-dev",
+            spans=[{"start": 7, "end": 11, "category": "PERSON", "expected": "REDACT", "surface": "Mira"}],
+        )
+        fails, _ = validate.run_split_integrity_check([self._entry(train), self._entry(dev, 2)])
+        assert any("masked-context signature crosses train/dev" in str(failure) for failure in fails)
+
+    def test_template_lineage_cross_split_fails_even_when_text_is_distinct(self):
+        train = make_valid_row(
+            id="train-lineage", text="Avery reviews the synthetic access record.", family_id="family-train", template_lineage="shared-lineage",
+            spans=[{"start": 0, "end": 5, "category": "PERSON", "expected": "REDACT", "surface": "Avery"}],
+        )
+        dev = make_valid_row(
+            id="dev-lineage", text="Mira closes a fictional routing ticket.", split="dev", family_id="family-dev", template_lineage="shared-lineage",
+            spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "REDACT", "surface": "Mira"}],
+        )
+        fails, _ = validate.run_split_integrity_check([self._entry(train), self._entry(dev, 2)])
+        assert any("template_lineage" in str(failure) and "crosses splits" in str(failure) for failure in fails)
 
 
 # ---------------------------------------------------------------------------

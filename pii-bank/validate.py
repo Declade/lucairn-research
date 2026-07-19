@@ -26,6 +26,9 @@ Stdlib-only (no new deps). Implements:
       is PUBLIC and home paths are a personal-info leak class
   (f) duplicate JSON keys are rejected in rows and manifest parsing (silent
       last-wins would let a second 'split' key shadow the first)
+  (g) --split-integrity proves canonical/masked train↔dev separation,
+      template-lineage atomicity, masked-signature diversity, and the
+      preregistered dev-near-duplicate ceiling
 
 Exit code 0 on a fully clean run, 1 if any FAIL was recorded.
 
@@ -36,6 +39,7 @@ manifest. Governing PRD: prd-2026-07-19-pii-data-bank-finetune-pilot.md.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -71,6 +75,7 @@ REQUIRED_FIELDS = {
     "family_id",
     "source",
     "created",
+    "template_lineage",
 }
 
 ALLOWED_LANG = {"en", "de"}
@@ -311,6 +316,12 @@ def validate_row(row: dict[str, Any], line_no: int, source_file: str) -> list[Fa
     # source
     if not isinstance(row["source"], str) or not row["source"]:
         fails.append(Failure(scope, f"source must be a non-empty string, got {row['source']!r}"))
+
+    # template lineage
+    if not isinstance(row["template_lineage"], str) or not row["template_lineage"]:
+        fails.append(
+            Failure(scope, f"template_lineage must be a non-empty string, got {row['template_lineage']!r}")
+        )
 
     # created
     if not isinstance(row["created"], str) or not CREATED_RE.match(row["created"]):
@@ -605,6 +616,181 @@ def normalize_text(text: str) -> str:
     return _WS_RE.sub(" ", folded.strip())
 
 
+def canonical_text(text: str) -> str:
+    """Canonical corpus identity: NFKC + casefold + whitespace collapse."""
+    return normalize_text(text)
+
+
+_VOLATILE_TOKEN_RE = re.compile(r"\b(?:syn|demo|lab|qa)-\d{5}-[a-z0-9]+\b", re.IGNORECASE)
+
+
+def masked_context_signature(row: dict[str, Any]) -> str:
+    """Rendered-context identity with spans and volatile ticket IDs masked.
+
+    This deliberately uses emitted text and span offsets only; family, source,
+    lineage, and labels cannot make a duplicated template look diverse.
+    """
+    text = row.get("text")
+    spans = row.get("spans")
+    if not isinstance(text, str) or not isinstance(spans, list):
+        raise ValueError("row needs string text and list spans")
+    masked = text
+    offsets: list[tuple[int, int]] = []
+    for span in spans:
+        if not isinstance(span, dict):
+            raise ValueError("non-object span")
+        start, end = span.get("start"), span.get("end")
+        if not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool):
+            raise ValueError("non-integer span offset")
+        if start < 0 or end <= start or end > len(text):
+            raise ValueError("invalid span offset")
+        offsets.append((start, end))
+    for start, end in sorted(offsets, reverse=True):
+        masked = masked[:start] + "<SPAN>" + masked[end:]
+    return canonical_text(_VOLATILE_TOKEN_RE.sub("<VOLATILE>", masked))
+
+
+def char_ngrams_5(text: str) -> frozenset[str]:
+    """Character 5-grams for the preregistered near-duplicate ceiling."""
+    canonical = canonical_text(text)
+    if not canonical:
+        return frozenset()
+    if len(canonical) < 5:
+        return frozenset({canonical})
+    return frozenset(canonical[i : i + 5] for i in range(len(canonical) - 4))
+
+
+def jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    overlap = len(left & right)
+    return overlap / (len(left) + len(right) - overlap)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    import math
+
+    return ordered[max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))]
+
+
+@dataclass(frozen=True)
+class SplitIntegrityStats:
+    train_rows: int
+    dev_rows: int
+    canonical_distinct: int
+    masked_distinct: int
+    masked_multiplicity_max: int
+    near_p50: float
+    near_p95: float
+    near_max: float
+    dev_ge_080: int
+
+
+def run_split_integrity_check(
+    rows: list[tuple[dict[str, Any], int, str]],
+) -> tuple[list[Failure], SplitIntegrityStats]:
+    """Corpus-global train/dev integrity gate over emitted rows."""
+    fails: list[Failure] = []
+    selected = [(row, line, source) for row, line, source in rows if row.get("split") in {"train", "dev"}]
+    train = [entry for entry in selected if entry[0].get("split") == "train"]
+    dev = [entry for entry in selected if entry[0].get("split") == "dev"]
+    if not train:
+        fails.append(Failure("split-integrity", "no train rows found; refusing to pass fail-open"))
+    if not dev:
+        fails.append(Failure("split-integrity", "no dev rows found; refusing to pass fail-open"))
+
+    canonical_locations: dict[str, list[tuple[dict[str, Any], int, str]]] = {}
+    signature_locations: dict[str, list[tuple[dict[str, Any], int, str]]] = {}
+    lineage_splits: dict[str, set[str]] = {}
+    family_ids: set[str] = set()
+    for row, line_no, source_file in selected:
+        scope = f"{source_file}:{line_no} id={row.get('id', '<no-id>')}"
+        text = row.get("text")
+        if not isinstance(text, str):
+            fails.append(Failure(scope, "cannot canonicalize non-string text"))
+            continue
+        canonical_locations.setdefault(canonical_text(text), []).append((row, line_no, source_file))
+        try:
+            signature = masked_context_signature(row)
+        except ValueError as exc:
+            fails.append(Failure(scope, f"cannot build masked-context signature: {exc}"))
+            continue
+        signature_locations.setdefault(signature, []).append((row, line_no, source_file))
+        lineage = row.get("template_lineage")
+        if not isinstance(lineage, str) or not lineage:
+            fails.append(Failure(scope, "missing usable template_lineage"))
+        else:
+            lineage_splits.setdefault(lineage, set()).add(str(row.get("split")))
+        family_id = row.get("family_id")
+        if isinstance(family_id, str) and family_id:
+            family_ids.add(family_id)
+
+    for canonical, entries in canonical_locations.items():
+        if len(entries) <= 1:
+            continue
+        splits = {str(entry[0].get("split")) for entry in entries}
+        scopes = ", ".join(f"{source}:{line}" for _, line, source in entries[:3])
+        detail = "canonical train↔dev overlap" if len(splits) > 1 else "canonical multiplicity exceeds 1"
+        fails.append(Failure("split-integrity", f"{detail} at {scopes}: {canonical!r}"))
+
+    masked_max = 0
+    for signature, entries in signature_locations.items():
+        masked_max = max(masked_max, len(entries))
+        splits = {str(entry[0].get("split")) for entry in entries}
+        scopes = ", ".join(f"{source}:{line}" for _, line, source in entries[:3])
+        if len(splits) > 1:
+            fails.append(Failure("split-integrity", f"masked-context signature crosses train/dev at {scopes}: {signature!r}"))
+        if len(entries) > 2:
+            fails.append(Failure("split-integrity", f"masked-context multiplicity {len(entries)} exceeds 2 at {scopes}"))
+    if len(signature_locations) < len(family_ids):
+        fails.append(
+            Failure(
+                "split-integrity",
+                f"masked-context diversity {len(signature_locations)} is below family count {len(family_ids)}",
+            )
+        )
+
+    for lineage, splits in lineage_splits.items():
+        if len(splits) > 1:
+            fails.append(Failure("split-integrity", f"template_lineage {lineage!r} crosses splits {sorted(splits)}"))
+
+    train_signatures = sorted({masked_context_signature(row) for row, _, _ in train}) if train else []
+    train_grams = [char_ngrams_5(signature) for signature in train_signatures]
+    nearest: list[float] = []
+    for row, _, _ in dev:
+        try:
+            dev_grams = char_ngrams_5(masked_context_signature(row))
+        except ValueError:
+            continue
+        score = max((jaccard(dev_grams, train_grams_item) for train_grams_item in train_grams), default=0.0)
+        nearest.append(score)
+        if score >= 0.90:
+            fails.append(
+                Failure(
+                    f"split-integrity id={row.get('id', '<no-id>')}",
+                    f"nearest masked train char-5-gram Jaccard {score:.4f} violates ceiling <0.90",
+                )
+            )
+
+    stats = SplitIntegrityStats(
+        train_rows=len(train),
+        dev_rows=len(dev),
+        canonical_distinct=len(canonical_locations),
+        masked_distinct=len(signature_locations),
+        masked_multiplicity_max=masked_max,
+        near_p50=_percentile(nearest, 0.50),
+        near_p95=_percentile(nearest, 0.95),
+        near_max=max(nearest, default=0.0),
+        dev_ge_080=sum(score >= 0.80 for score in nearest),
+    )
+    return fails, stats
+
+
 def ngrams(text: str, n: int = 8) -> set[str]:
     tokens = _WORD_RE.findall(normalize_text(text))
     if len(tokens) < n:
@@ -784,6 +970,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run normalized 8-gram overlap check between train/dev rows and eval-only manifest assets",
     )
+    parser.add_argument(
+        "--split-integrity",
+        action="store_true",
+        help="enforce canonical/masked train-dev separation, lineage atomicity, and near-duplicate ceiling",
+    )
     args = parser.parse_args(argv)
 
     all_fails: list[Failure] = []
@@ -831,6 +1022,11 @@ def main(argv: list[str] | None = None) -> int:
         contamination_fails = run_contamination_check(all_parsed_rows)
         all_fails.extend(contamination_fails)
 
+    split_stats: SplitIntegrityStats | None = None
+    if args.split_integrity:
+        split_fails, split_stats = run_split_integrity_check(all_parsed_rows)
+        all_fails.extend(split_fails)
+
     for w in all_warns:
         print(w, file=sys.stderr)
     for f in all_fails:
@@ -842,7 +1038,17 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(all_fails)} FAIL(s), {len(all_warns)} WARN(s)"
         + (" [--check-manifest]" if args.check_manifest else "")
         + (" [--contamination]" if args.contamination else "")
+        + (" [--split-integrity]" if args.split_integrity else "")
     )
+    if split_stats is not None:
+        print(
+            "split-integrity: "
+            f"train={split_stats.train_rows} dev={split_stats.dev_rows} "
+            f"canonical={split_stats.canonical_distinct} masked={split_stats.masked_distinct} "
+            f"multiplicity_max={split_stats.masked_multiplicity_max} "
+            f"near_jaccard_p50={split_stats.near_p50:.4f} p95={split_stats.near_p95:.4f} "
+            f"max={split_stats.near_max:.4f} dev_ge_0_80={split_stats.dev_ge_080}"
+        )
 
     if all_fails:
         print("RESULT: FAIL", file=sys.stderr)
