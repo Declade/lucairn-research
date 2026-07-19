@@ -11,8 +11,11 @@ schema, `manifest.json` for the eval-quarantine manifest). Governing PRD:
    Never author a row from memory or from an unverified claim.
 
 2. **Label it.** Determine the `lang`, `zone` (mirrors the two-lane zoner
-   taxonomy), and every `spans` entry (`start`/`end` byte offsets into `text`,
-   `category`, `expected: REDACT|KEEP`). If the finding is a contrast pair
+   taxonomy), and every `spans` entry (`start`/`end` Unicode codepoint offsets
+   — Python `str` indices — into `text`, `category`, `expected: REDACT|KEEP`,
+   and the REQUIRED `surface` string, which must equal `text[start:end]`
+   exactly; author offsets with `str.find`/`str.index`, never on encoded
+   bytes). If the finding is a contrast pair
    (same surface form, different expected outcome depending on context — e.g.
    "integration user" as a system role vs. a name-adjacent phrase), author
    BOTH sides as separate rows sharing one `family_id`.

@@ -24,7 +24,7 @@ Every row is one JSON object per line in a `rows/*.jsonl` file. Fields:
 | `text` | string | any | the labeled example text |
 | `lang` | string | `en` \| `de` | |
 | `zone` | string | `prose` \| `json_value` \| `json_key` \| `schema_label` \| `technical_id` \| `url` \| `code_identifier` \| `comment` \| `string_literal` | mirrors the two-lane zoner taxonomy from `design-2026-07-17-sanitizer-typed-two-lane.md` |
-| `spans` | list of objects | `{start, end, category, expected}` | `start`/`end` are **byte offsets** into `text`; `expected` is `REDACT` \| `KEEP` |
+| `spans` | list of objects | `{start, end, category, expected, surface}` | `start`/`end` are **Unicode codepoint offsets** (Python `str` indices) into `text` — NOT bytes; `expected` is `REDACT` \| `KEEP`; `surface` is REQUIRED and must equal `text[start:end]` exactly (validator-enforced content check — catches byte-vs-codepoint mislabels and off-by-ones that bounds checks miss) |
 | `org_id` | string \| null | any org identifier, or `null` | `null` = global (default); non-null rows are reserved for the future per-org Enterprise custom-shield tier — see `INTAKE.md` § Org-scoping |
 | `provenance` | string | `synthetic-generated` \| `measured-live` \| `dogfood` \| `eval-import` | governs where the row is allowed to live and which split it may carry — see Quarantine rules below |
 | `consent_basis` | string | `synthetic` \| `own-data` \| `contracted` \| `public-corpus` | |

@@ -2,9 +2,11 @@
 
 Covers: a valid row passes clean; each FAIL class fires (bad enum,
 train+measured-provenance, public-repo+dogfood-provenance, span out-of-bounds,
-family-split inconsistency, manifest hash mismatch via a temp file, manifest
-home-directory path leak); local-root resolution via PII_BANK_LOCAL_ROOT; and
-the contamination check fires on a real overlap and stays clean without one.
+span surface mismatch / missing surface, byte-authored offsets on non-ASCII
+text, family-split inconsistency, manifest hash mismatch via a temp file,
+manifest home-directory path leak); local-root resolution via
+PII_BANK_LOCAL_ROOT; and the contamination check fires on a real overlap and
+stays clean without one.
 """
 
 from __future__ import annotations
@@ -32,8 +34,12 @@ def make_valid_row(**overrides) -> dict:
         "lang": "en",
         "zone": "prose",
         "spans": [
-            {"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT"},
-            {"start": 21, "end": 27, "category": "LOCATION", "expected": "REDACT"},
+            # Codepoint offsets + surface. NOTE: the pre-surface version of this
+            # fixture carried [21,27] for Berlin -- which slices "erlin." -- and
+            # bounds-only validation accepted it: the exact latent class the
+            # surface check now catches.
+            {"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT", "surface": "John Smith"},
+            {"start": 20, "end": 26, "category": "LOCATION", "expected": "REDACT", "surface": "Berlin"},
         ],
         "org_id": None,
         "provenance": "synthetic-generated",
@@ -101,7 +107,9 @@ class TestBadEnum:
         assert any("split" in str(f) for f in fails)
 
     def test_bad_span_expected_fails(self):
-        row = make_valid_row(spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "MAYBE"}])
+        row = make_valid_row(
+            spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "MAYBE", "surface": "John"}]
+        )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("expected" in str(f) for f in fails)
 
@@ -124,23 +132,37 @@ class TestBadEnum:
 
 
 class TestSpanOutOfBounds:
+    # Invalid offsets skip the surface-equality check (nothing safe to slice),
+    # but the surface FIELD must still be present -- "x" placeholders below.
     def test_span_end_past_text_length_fails(self):
-        row = make_valid_row(text="short", spans=[{"start": 0, "end": 999, "category": "PERSON", "expected": "REDACT"}])
+        row = make_valid_row(
+            text="short",
+            spans=[{"start": 0, "end": 999, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
+        )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("out of bounds" in str(f) for f in fails)
 
     def test_span_start_past_text_length_fails(self):
-        row = make_valid_row(text="short", spans=[{"start": 999, "end": 1000, "category": "PERSON", "expected": "REDACT"}])
+        row = make_valid_row(
+            text="short",
+            spans=[{"start": 999, "end": 1000, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
+        )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("out of bounds" in str(f) for f in fails)
 
     def test_negative_span_offset_fails(self):
-        row = make_valid_row(text="short", spans=[{"start": -1, "end": 3, "category": "PERSON", "expected": "REDACT"}])
+        row = make_valid_row(
+            text="short",
+            spans=[{"start": -1, "end": 3, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
+        )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("negative offset" in str(f) for f in fails)
 
     def test_end_before_start_fails(self):
-        row = make_valid_row(text="short text", spans=[{"start": 5, "end": 2, "category": "PERSON", "expected": "REDACT"}])
+        row = make_valid_row(
+            text="short text",
+            spans=[{"start": 5, "end": 2, "category": "PERSON", "expected": "REDACT", "surface": "x"}],
+        )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("end < start" in str(f) for f in fails)
 
@@ -156,10 +178,102 @@ class TestSpanOutOfBounds:
 
     def test_span_unknown_field_fails(self):
         row = make_valid_row(
-            spans=[{"start": 0, "end": 4, "category": "PERSON", "expected": "REDACT", "confidence": 0.9}]
+            spans=[
+                {
+                    "start": 0,
+                    "end": 4,
+                    "category": "PERSON",
+                    "expected": "REDACT",
+                    "surface": "John",
+                    "confidence": 0.9,
+                }
+            ]
         )
         fails = validate.validate_row(row, 1, "test.jsonl")
         assert any("unknown span field" in str(f) for f in fails)
+
+
+# ---------------------------------------------------------------------------
+# surface + codepoint-offset convention (bug-hunter finding on 41cd9e5:
+# byte-vs-codepoint span confusion was undetectable -- both conventions passed
+# bounds-only checks on ASCII rows and silently poisoned non-ASCII rows)
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceAndCodepointOffsets:
+    UMLAUT_TEXT = "Frau Müller aus München meldete den Vorfall."
+    # Codepoint (str-index) offsets -- the declared convention.
+    CP_START = UMLAUT_TEXT.index("Müller")          # 5
+    CP_END = CP_START + len("Müller")               # 11
+    # Byte-derived offsets -- the mislabel class the reviewer proved slipped
+    # through: 'ü' is 2 bytes in UTF-8, so the byte end lands one past.
+    BYTE_START = len(UMLAUT_TEXT[:5].encode("utf-8"))                 # 5
+    BYTE_END = BYTE_START + len("Müller".encode("utf-8"))             # 12
+
+    def _umlaut_row(self, start: int, end: int) -> dict:
+        return make_valid_row(
+            id="umlaut-probe-row",
+            lang="de",
+            text=self.UMLAUT_TEXT,
+            spans=[{"start": start, "end": end, "category": "PERSON", "expected": "REDACT", "surface": "Müller"}],
+        )
+
+    def test_codepoint_correct_umlaut_span_passes(self):
+        row = self._umlaut_row(self.CP_START, self.CP_END)
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert fails == [], f"expected zero failures, got: {[str(f) for f in fails]}"
+
+    def test_byte_authored_umlaut_span_fails_via_surface_mismatch(self):
+        # Pre-fix, this span passed bounds-only validation despite slicing
+        # 'üller ' instead of 'Müller'. It must now FAIL.
+        assert self.BYTE_END != self.CP_END  # the probe is only meaningful if they diverge
+        row = self._umlaut_row(self.BYTE_START, self.BYTE_END)
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("surface mismatch" in str(f) for f in fails)
+
+    def test_surface_mismatch_on_ascii_fails(self):
+        row = make_valid_row(
+            spans=[{"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT", "surface": "Jane Smith"}]
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("surface mismatch" in str(f) for f in fails)
+
+    def test_missing_surface_fails(self):
+        row = make_valid_row(spans=[{"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT"}])
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("missing span field" in str(f) and "surface" in str(f) for f in fails)
+
+    def test_surface_wrong_type_fails(self):
+        row = make_valid_row(
+            spans=[{"start": 0, "end": 10, "category": "PERSON", "expected": "REDACT", "surface": 42}]
+        )
+        fails = validate.validate_row(row, 1, "test.jsonl")
+        assert any("surface must be a string" in str(f) for f in fails)
+
+    def test_main_end_to_end_on_umlaut_rows(self, tmp_path, monkeypatch):
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps({"entries": []}), encoding="utf-8")
+        monkeypatch.setattr(validate, "MANIFEST_PATH", manifest_path)
+
+        # Codepoint-correct umlaut row file -> exit 0
+        good_dir = tmp_path / "good" / "rows"
+        good_dir.mkdir(parents=True)
+        good_row = self._umlaut_row(self.CP_START, self.CP_END)
+        (good_dir / "umlaut.jsonl").write_text(
+            json.dumps(good_row, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(validate, "ROWS_DIR", good_dir)
+        assert validate.main([]) == 0
+
+        # Byte-authored umlaut row file -> exit 1
+        bad_dir = tmp_path / "bad" / "rows"
+        bad_dir.mkdir(parents=True)
+        bad_row = self._umlaut_row(self.BYTE_START, self.BYTE_END)
+        (bad_dir / "umlaut.jsonl").write_text(
+            json.dumps(bad_row, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(validate, "ROWS_DIR", bad_dir)
+        assert validate.main([]) == 1
 
 
 # ---------------------------------------------------------------------------

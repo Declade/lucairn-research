@@ -3,7 +3,9 @@
 
 Stdlib-only (no new deps). Implements:
 
-  (a) schema validation of every rows/*.jsonl row
+  (a) schema validation of every rows/*.jsonl row -- span start/end are
+      Unicode CODEPOINT indices (Python str indices) into text, and every
+      span's REQUIRED 'surface' field must equal text[start:end]
   (b) quarantine enforcement (train/dev must be synthetic-generated;
       in-repo rows must never be measured-live/dogfood; family_id rows
       must all share one split)
@@ -80,7 +82,7 @@ ALLOWED_PROVENANCE = {"synthetic-generated", "measured-live", "dogfood", "eval-i
 ALLOWED_CONSENT_BASIS = {"synthetic", "own-data", "contracted", "public-corpus"}
 ALLOWED_SPLIT = {"train", "dev", "eval-only"}
 ALLOWED_SPAN_EXPECTED = {"REDACT", "KEEP"}
-ALLOWED_SPAN_FIELDS = {"start", "end", "category", "expected"}
+ALLOWED_SPAN_FIELDS = {"start", "end", "category", "expected", "surface"}
 
 CREATED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -135,7 +137,13 @@ def parse_jsonl(path: Path) -> list[tuple[int, dict[str, Any] | None, str | None
     return out
 
 
-def validate_span(row_id: str, text_len: int, span: Any, idx: int) -> list[Failure]:
+def validate_span(row_id: str, text: str, span: Any, idx: int) -> list[Failure]:
+    """Validate one span. Offsets are Unicode CODEPOINT indices (Python str
+    indices) into text -- the natural authoring path (str.find, generator
+    tooling, HF/GLiNER span models) all operate on str indices. The REQUIRED
+    'surface' field must equal text[start:end]; this content check is what
+    catches codepoint-vs-byte mislabels, off-by-ones, and stale spans that
+    pure bounds checks silently accept (bug-hunter finding on 41cd9e5)."""
     fails: list[Failure] = []
     scope = f"row={row_id} span[{idx}]"
     if not isinstance(span, dict):
@@ -148,21 +156,28 @@ def validate_span(row_id: str, text_len: int, span: Any, idx: int) -> list[Failu
     if missing:
         fails.append(Failure(scope, f"missing span field(s): {sorted(missing)}"))
         return fails
+    text_len = len(text)
     start, end = span.get("start"), span.get("end")
+    offsets_ok = True
     if not isinstance(start, int) or not isinstance(end, int):
         fails.append(Failure(scope, f"start/end must be int, got start={start!r} end={end!r}"))
+        offsets_ok = False
     else:
         if start < 0 or end < 0:
             fails.append(Failure(scope, f"negative offset: start={start} end={end}"))
+            offsets_ok = False
         if end < start:
             fails.append(Failure(scope, f"end < start: start={start} end={end}"))
+            offsets_ok = False
         if start > text_len or end > text_len:
             fails.append(
                 Failure(
                     scope,
-                    f"span out of bounds: start={start} end={end} text_len={text_len}",
+                    f"span out of bounds: start={start} end={end} text_len={text_len} "
+                    f"(offsets are Unicode codepoint indices, not bytes)",
                 )
             )
+            offsets_ok = False
     if not isinstance(span.get("category"), str) or not span.get("category"):
         fails.append(Failure(scope, f"category must be a non-empty string, got {span.get('category')!r}"))
     if span.get("expected") not in ALLOWED_SPAN_EXPECTED:
@@ -172,6 +187,20 @@ def validate_span(row_id: str, text_len: int, span: Any, idx: int) -> list[Failu
                 f"expected must be one of {sorted(ALLOWED_SPAN_EXPECTED)}, got {span.get('expected')!r}",
             )
         )
+    surface = span.get("surface")
+    if not isinstance(surface, str):
+        fails.append(Failure(scope, f"surface must be a string, got {surface!r}"))
+    elif offsets_ok:
+        actual = text[start:end]
+        if actual != surface:
+            fails.append(
+                Failure(
+                    scope,
+                    f"surface mismatch: text[start:end] is {actual!r} but surface declares "
+                    f"{surface!r} (offsets are Unicode codepoint indices into text; "
+                    f"byte-derived offsets are the classic cause)",
+                )
+            )
     return fails
 
 
@@ -204,9 +233,9 @@ def validate_row(row: dict[str, Any], line_no: int, source_file: str) -> list[Fa
     # text
     if not isinstance(row["text"], str):
         fails.append(Failure(scope, f"text must be a string, got {type(row['text'])}"))
-        text_len = 0
+        text_val = ""
     else:
-        text_len = len(row["text"].encode("utf-8"))
+        text_val = row["text"]
 
     # lang
     if row["lang"] not in ALLOWED_LANG:
@@ -216,13 +245,13 @@ def validate_row(row: dict[str, Any], line_no: int, source_file: str) -> list[Fa
     if row["zone"] not in ALLOWED_ZONE:
         fails.append(Failure(scope, f"zone must be one of {sorted(ALLOWED_ZONE)}, got {row['zone']!r}"))
 
-    # spans
+    # spans (offsets are Unicode codepoint indices into text -- see validate_span)
     spans = row["spans"]
     if not isinstance(spans, list):
         fails.append(Failure(scope, f"spans must be a list, got {type(spans)}"))
     else:
         for idx, span in enumerate(spans):
-            fails.extend(validate_span(row_id, text_len, span, idx))
+            fails.extend(validate_span(row_id, text_val, span, idx))
 
     # org_id
     if row["org_id"] is not None and not isinstance(row["org_id"], str):
