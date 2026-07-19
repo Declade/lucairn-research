@@ -1,0 +1,15 @@
+{
+  "base_mix": {"file_sha256": {"train_jsonl": "9c4c2a40cc74846ab66d6ff6f6f32fb542b62dfddad7500bc69b6fba8b0e6ea7", "train_parquet": "ba471517ab5f7802ccac010a630c4c111c6de66e509087410e70829544487467", "validation_jsonl": "4cd6b7392bfa3ee0fd71432ef441155c56639e5bb877e3638365566a1afca9cd", "validation_parquet": "ec3d286fb14b5970880b5ad53aea100f601a5ef8eb6db2d5a76d7fc9a8f7dd23"}, "record_path": "context/pii-bank/base-mix/admission-record-ai4privacy-mini10k-ad851605.md", "record_sha256": "090d2e44f84fa4328abce5e6910377db8d4b1a310c3c0838ffeedbb32f1f0087", "replay_label_policy": "GIVENNAME/SURNAME→PERSON and CITY/STREET→LOCATION only; EMAIL and TELEPHONENUM are dropped because PHONE is not frozen and EMAIL is not in the frozen training label set; all remaining upstream labels are unannotated context.", "train_jsonl_path": "context/pii-bank/base-mix/data-mini10k/export-train.jsonl", "train_parquet_path": "context/pii-bank/base-mix/data-mini10k/train-00000-of-00001.parquet", "validation_jsonl_path": "context/pii-bank/base-mix/data-mini10k/export-validation.jsonl", "validation_parquet_path": "context/pii-bank/base-mix/data-mini10k/validation-00000-of-00001.parquet"},
+  "baseline_config": "baseline.json",
+  "candidates": [
+    {"candidate_id": "1k-default", "corpus_size": 1000, "overrides": {"learning_rate_encoder": 5e-06, "learning_rate_other": 1e-05}},
+    {"candidate_id": "1k-low-lr", "corpus_size": 1000, "overrides": {"learning_rate_encoder": 3e-06, "learning_rate_other": 6e-06}},
+    {"candidate_id": "3k-default", "corpus_size": 3000, "overrides": {"learning_rate_encoder": 5e-06, "learning_rate_other": 1e-05}},
+    {"candidate_id": "3k-low-lr", "corpus_size": 3000, "overrides": {"learning_rate_encoder": 3e-06, "learning_rate_other": 6e-06}},
+    {"candidate_id": "8k-default", "corpus_size": 8000, "overrides": {"learning_rate_encoder": 5e-06, "learning_rate_other": 1e-05}},
+    {"candidate_id": "8k-low-lr", "corpus_size": 8000, "overrides": {"learning_rate_encoder": 3e-06, "learning_rate_other": 6e-06}}
+  ],
+  "schema_version": 1,
+  "selection_metric": "macro_f1",
+  "training_base_config": "seed1.json"
+}
