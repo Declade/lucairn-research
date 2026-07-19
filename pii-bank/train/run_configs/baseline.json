@@ -1,0 +1,22 @@
+{
+  "base_checkpoint": {"model_id": "urchade/gliner_multi_pii-v1", "revision": "1fcf13e8"},
+  "corpus_size": 0,
+  "dev_sha256": "8c7b762e0eca7d3455c497fc503552b47fb62bab2945bdf807524f183051518f",
+  "method_freeze": {
+    "justification": "Full FP32 fine-tuning is frozen for candidate runs because the roughly 200M checkpoint fits MPS unified memory and FP32 is the MPS-protocol start; this untouched baseline is scored first without applying that update.",
+    "label_order": [{"category": "PERSON", "model_label": "person"}, {"category": "LOCATION", "model_label": "location"}, {"category": "VENDOR", "model_label": "vendor"}, {"category": "ROLE", "model_label": "role"}, {"category": "TECHNICAL_IDENTIFIER", "model_label": "technical identifier"}],
+    "max_span_width": 12,
+    "precision": "fp32",
+    "save_reload": {"artifact_format": "untouched pinned checkpoint / from_pretrained", "evaluate_only_saved_and_reloaded": true},
+    "sequence_length": 384,
+    "threshold": 0.4,
+    "tokenizer": {"revision": "1fcf13e8", "source": "base-checkpoint-bundled"},
+    "update_method": "full_fine_tune"
+  },
+  "mode": "baseline",
+  "run_id": "s3-baseline-untouched",
+  "sampler": {"base_replay_fraction": 0.5, "contextual_hard_negative_fraction": 0.25, "kind": "not-applicable-baseline", "structural_domain_positive_fraction": 0.25},
+  "schema_version": 1,
+  "seed": 0,
+  "training": {"batch_size": 4, "epochs": 0, "learning_rate_encoder": 5e-06, "learning_rate_other": 1e-05, "loss_reduction": "sum", "max_grad_norm": 1.0, "scheduler": "linear", "warmup_ratio": 0.1, "weight_decay_encoder": 0.01, "weight_decay_other": 0.01}
+}

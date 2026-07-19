@@ -1,0 +1,23 @@
+{
+  "base_checkpoint": {"model_id": "urchade/gliner_multi_pii-v1", "revision": "1fcf13e8"},
+  "base_mix": {"file_sha256": {"train_jsonl": "9c4c2a40cc74846ab66d6ff6f6f32fb542b62dfddad7500bc69b6fba8b0e6ea7", "train_parquet": "ba471517ab5f7802ccac010a630c4c111c6de66e509087410e70829544487467", "validation_jsonl": "4cd6b7392bfa3ee0fd71432ef441155c56639e5bb877e3638365566a1afca9cd", "validation_parquet": "ec3d286fb14b5970880b5ad53aea100f601a5ef8eb6db2d5a76d7fc9a8f7dd23"}, "record_path": "context/pii-bank/base-mix/admission-record-ai4privacy-mini10k-ad851605.md", "record_sha256": "090d2e44f84fa4328abce5e6910377db8d4b1a310c3c0838ffeedbb32f1f0087", "replay_label_policy": "GIVENNAME/SURNAME→PERSON and CITY/STREET→LOCATION only; EMAIL and TELEPHONENUM are dropped because PHONE is not frozen and EMAIL is not in the frozen training label set; all remaining upstream labels are unannotated context.", "train_jsonl_path": "context/pii-bank/base-mix/data-mini10k/export-train.jsonl", "train_parquet_path": "context/pii-bank/base-mix/data-mini10k/train-00000-of-00001.parquet", "validation_jsonl_path": "context/pii-bank/base-mix/data-mini10k/export-validation.jsonl", "validation_parquet_path": "context/pii-bank/base-mix/data-mini10k/validation-00000-of-00001.parquet"},
+  "corpus_size": 8000,
+  "dev_sha256": "8c7b762e0eca7d3455c497fc503552b47fb62bab2945bdf807524f183051518f",
+  "method_freeze": {
+    "justification": "Full FP32 fine-tuning keeps every parameter trainable in the roughly 200M checkpoint, which fits MPS unified memory and is the required MPS-protocol starting precision; adapters would add disallowed PEFT/custom scope.",
+    "label_order": [{"category": "PERSON", "model_label": "person"}, {"category": "LOCATION", "model_label": "location"}, {"category": "VENDOR", "model_label": "vendor"}, {"category": "ROLE", "model_label": "role"}, {"category": "TECHNICAL_IDENTIFIER", "model_label": "technical identifier"}],
+    "max_span_width": 12,
+    "precision": "fp32",
+    "save_reload": {"artifact_format": "GLiNER Trainer.save_model / from_pretrained", "evaluate_only_saved_and_reloaded": true},
+    "sequence_length": 384,
+    "threshold": 0.4,
+    "tokenizer": {"revision": "1fcf13e8", "source": "base-checkpoint-bundled"},
+    "update_method": "full_fine_tune"
+  },
+  "mode": "final",
+  "run_id": "s3-final-seed2",
+  "sampler": {"base_replay_fraction": 0.5, "contextual_hard_negative_fraction": 0.25, "kind": "token_and_update_weighted", "structural_domain_positive_fraction": 0.25},
+  "schema_version": 1,
+  "seed": 2097593,
+  "training": {"batch_size": 4, "epochs": 3, "learning_rate_encoder": 5e-06, "learning_rate_other": 1e-05, "loss_reduction": "sum", "max_grad_norm": 1.0, "scheduler": "linear", "warmup_ratio": 0.1, "weight_decay_encoder": 0.01, "weight_decay_other": 0.01}
+}

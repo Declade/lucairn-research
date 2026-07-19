@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+
+# Training state belongs under PII_BANK_LOCAL_ROOT, never in this public tree.
+artifact/
+checkpoint-*/
+run.json
+selection-log.json
+frozen-final-config.json
