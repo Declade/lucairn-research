@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import io
 import sys
@@ -18,10 +19,13 @@ sys.path.insert(0, str(TRAIN_DIR))
 import select_on_dev  # noqa: E402
 import smoke  # noqa: E402
 import eval_model  # noqa: E402
+import train  # noqa: E402
 from eval_model import evaluate_loaded_model, load_quarantined_eval_rows, score_predictions  # noqa: E402
 from powerfloor_freeze import current_dev_counts, parse_frozen_power_floors, verify_power_floors  # noqa: E402
 from tooling import (  # noqa: E402
     AI4PRIVACY_BASE_MIX,
+    BASE_CHECKPOINT,
+    BASE_REVISION,
     CustodyError,
     DEV_SHA256,
     FrozenDevMismatch,
@@ -30,9 +34,11 @@ from tooling import (  # noqa: E402
     ToolingError,
     FinalRunRefused,
     ai4privacy_replay_row,
+    convert_ai4privacy_replay_rows,
     load_synthetic_checkpoint,
     load_run_config,
     row_to_gliner_example,
+    rows_to_gliner_examples,
     sha256_file,
     validate_run_config,
     verify_frozen_dev,
@@ -95,6 +101,91 @@ class TrainToolingTests(unittest.TestCase):
         self.assertEqual(args.parity_tolerance, 0.02)
         self.assertEqual(args.parity_absolute_tolerance, 0.05)
         self.assertEqual(args.seed, 104729)
+
+    def test_train_cli_exposes_replay_preflight_without_starting_training(self) -> None:
+        actions = {option for action in train.build_parser()._actions for option in action.option_strings}
+        self.assertTrue({"--validate-replay", "--max-steps-override"}.issubset(actions))
+
+    def test_seed_controlled_torch_uses_warn_only_and_run_json_requires_nondeterministic_ops(self) -> None:
+        class FakeTorch:
+            def __init__(self) -> None:
+                self.calls: list[tuple[bool, bool]] = []
+
+            def use_deterministic_algorithms(self, enabled: bool, *, warn_only: bool) -> None:
+                self.calls.append((enabled, warn_only))
+
+        fake_torch = FakeTorch()
+        train._enable_seed_controlled_torch(fake_torch)
+        self.assertEqual(fake_torch.calls, [(True, True)])
+        self.assertIn("nondeterministic_ops", train.RUN_JSON_REQUIRED_FIELDS)
+
+    def test_nondeterministic_ops_extracts_unique_mps_warning_operations(self) -> None:
+        class WarningRecord:
+            def __init__(self, message: str) -> None:
+                self.message = message
+
+        self.assertEqual(
+            train._nondeterministic_ops(
+                [
+                    WarningRecord("scatter_reduce_mps does not have a deterministic implementation, but you set warn_only."),
+                    WarningRecord("unrelated warning"),
+                    WarningRecord("scatter_reduce_mps does not have a deterministic implementation, but you set warn_only."),
+                ]
+            ),
+            ["scatter_reduce_mps"],
+        )
+
+    def test_train_validate_replay_cli_reports_all_rows_without_importing_torch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            local_root = Path(directory)
+            train_jsonl = local_root / "export-train.jsonl"
+            train_jsonl.write_text(
+                '{"source_text":"Ada","language":"en","uid":1,"privacy_mask":[{"start":0,"end":3,"label":"GIVENNAME","value":"Ada"}]}\n',
+                encoding="utf-8",
+            )
+            train_parquet = local_root / "train.parquet"
+            train_parquet.write_bytes(b"fixture parquet")
+            validation_parquet = local_root / "validation.parquet"
+            validation_parquet.write_bytes(b"fixture validation parquet")
+            validation_jsonl = local_root / "validation.jsonl"
+            validation_jsonl.write_text("{}\n", encoding="utf-8")
+            altered = copy.deepcopy(AI4PRIVACY_BASE_MIX)
+            altered.update(
+                {
+                    "record_path": "admission.md",
+                    "train_parquet_path": "train.parquet",
+                    "train_jsonl_path": "export-train.jsonl",
+                    "validation_parquet_path": "validation.parquet",
+                    "validation_jsonl_path": "validation.jsonl",
+                }
+            )
+            altered["file_sha256"] = {
+                "train_parquet": sha256_file(train_parquet),
+                "train_jsonl": sha256_file(train_jsonl),
+                "validation_parquet": sha256_file(validation_parquet),
+                "validation_jsonl": sha256_file(validation_jsonl),
+            }
+            record = local_root / "admission.md"
+            record.write_text(
+                "**ADMITTED** train parquet ONLY\n" + "\n".join(altered["file_sha256"].values()),
+                encoding="utf-8",
+            )
+            altered["record_sha256"] = sha256_file(record)
+            config = json.loads((TRAIN_DIR / "run_configs" / "seed1.json").read_text(encoding="utf-8"))
+            config["base_mix"] = altered
+            config_path = local_root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            original = __import__("tooling").AI4PRIVACY_BASE_MIX
+            try:
+                __import__("tooling").AI4PRIVACY_BASE_MIX = altered
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    result = train.main(["--config", str(config_path), "--local-root", str(local_root), "--validate-replay"])
+                self.assertEqual(result, 0)
+                self.assertIn('"total_rows": 1', stream.getvalue())
+                self.assertIn('"rows_dropped": 0', stream.getvalue())
+            finally:
+                __import__("tooling").AI4PRIVACY_BASE_MIX = original
 
     def test_json_adjacent_structural_span_converts_to_word_level_gliner_indices(self) -> None:
         row = next(row for row in load_synthetic_checkpoint(1000) if row["id"] == "gen2-struct-name-de-f09-p031-1")
@@ -307,6 +398,131 @@ class TrainToolingTests(unittest.TestCase):
         self.assertEqual([span["surface"] for span in row["spans"]], ["Ada", "Doe", "Bonn", "Main St"])
         self.assertEqual(row["family_id"], "ai4privacy-mini10k-42")
         self.assertEqual(row["split"], "train")
+
+    def test_base_mix_mid_word_span_snaps_to_training_tokens_and_recomputes_surface(self) -> None:
+        result = convert_ai4privacy_replay_rows(
+            [
+                {
+                    "source_text": "Meet Annette today.",
+                    "language": "en",
+                    "uid": 7,
+                    "privacy_mask": [{"start": 6, "end": 9, "label": "GIVENNAME", "value": "nne"}],
+                }
+            ]
+        )
+        self.assertEqual(result.report, {"total_rows": 1, "spans_snapped": 1, "rows_dropped": 0, "dropped_row_example_ids": []})
+        self.assertEqual(result.rows[0]["spans"], [{"start": 5, "end": 12, "category": "PERSON", "expected": "REDACT", "surface": "Annette"}])
+        self.assertEqual(row_to_gliner_example(result.rows[0])["ner"], [[1, 1, "person"]])
+
+    def test_base_mix_unalignable_span_crossing_another_span_drops_whole_row(self) -> None:
+        result = convert_ai4privacy_replay_rows(
+            [
+                {
+                    "source_text": "Annette",
+                    "language": "en",
+                    "uid": 8,
+                    "privacy_mask": [
+                        {"start": 0, "end": 3, "label": "GIVENNAME", "value": "Ann"},
+                        {"start": 3, "end": 7, "label": "SURNAME", "value": "ette"},
+                    ],
+                },
+                *[
+                    {
+                        "source_text": "Ada",
+                        "language": "en",
+                        "uid": uid,
+                        "privacy_mask": [{"start": 0, "end": 3, "label": "GIVENNAME", "value": "Ada"}],
+                    }
+                    for uid in range(9, 19)
+                ],
+            ]
+        )
+        self.assertEqual([row["id"] for row in result.rows], [f"ai4privacy-mini10k-{uid}" for uid in range(9, 19)])
+        self.assertEqual(result.report["rows_dropped"], 1)
+        self.assertEqual(result.report["dropped_row_example_ids"], ["ai4privacy-mini10k-8"])
+
+    def test_base_mix_drop_keeps_prior_snapped_span_in_accounting(self) -> None:
+        result = convert_ai4privacy_replay_rows(
+            [
+                {
+                    "source_text": "Annette ",
+                    "language": "en",
+                    "uid": 30,
+                    "privacy_mask": [
+                        {"start": 1, "end": 3, "label": "GIVENNAME", "value": "nn"},
+                        {"start": 7, "end": 8, "label": "SURNAME", "value": " "},
+                    ],
+                },
+                *[
+                    {
+                        "source_text": "Ada",
+                        "language": "en",
+                        "uid": uid,
+                        "privacy_mask": [{"start": 0, "end": 3, "label": "GIVENNAME", "value": "Ada"}],
+                    }
+                    for uid in range(31, 41)
+                ],
+            ]
+        )
+        self.assertEqual(result.report["spans_snapped"], 1)
+        self.assertEqual(result.report["dropped_row_example_ids"], ["ai4privacy-mini10k-30"])
+
+    def test_base_mix_alignment_threshold_breach_refuses_before_training(self) -> None:
+        unsafe = [
+            {
+                "source_text": "Annette",
+                "language": "en",
+                "uid": uid,
+                "privacy_mask": [
+                    {"start": 0, "end": 3, "label": "GIVENNAME", "value": "Ann"},
+                    {"start": 3, "end": 7, "label": "SURNAME", "value": "ette"},
+                ],
+            }
+            for uid in range(10, 12)
+        ]
+        safe = [
+            {
+                "source_text": "Ada",
+                "language": "en",
+                "uid": uid,
+                "privacy_mask": [{"start": 0, "end": 3, "label": "GIVENNAME", "value": "Ada"}],
+            }
+            for uid in range(12, 21)
+        ]
+        with self.assertRaisesRegex(FinalRunRefused, r"2/11 rows \(>10%\)"):
+            convert_ai4privacy_replay_rows([*unsafe, *safe])
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("torch") is not None,
+        "requires the pinned torch training venv",
+    )
+    @unittest.skipUnless(
+        importlib.util.find_spec("gliner") is not None,
+        "requires the pinned GLiNER training venv",
+    )
+    def test_real_gliner_venv_accepts_the_snapped_training_example_contract(self) -> None:
+        import torch
+        from gliner import GLiNER
+        from gliner.data_processing import UniEncoderSpanDataCollator
+
+        result = convert_ai4privacy_replay_rows(
+            [
+                {
+                    "source_text": "Meet Annette today.",
+                    "language": "en",
+                    "uid": 22,
+                    "privacy_mask": [{"start": 6, "end": 9, "label": "GIVENNAME", "value": "nne"}],
+                }
+            ]
+        )
+        example = rows_to_gliner_examples(result.rows)[0]
+        model = GLiNER.from_pretrained(BASE_CHECKPOINT, revision=BASE_REVISION)
+        collator = UniEncoderSpanDataCollator(model.config, data_processor=model.data_processor, prepare_labels=True)
+        batch = collator([example])
+        self.assertTrue({"input_ids", "attention_mask", "span_idx", "span_mask", "labels"}.issubset(batch))
+        tensors = [value for value in batch.values() if isinstance(value, torch.Tensor)]
+        self.assertTrue(tensors)
+        self.assertTrue(all(not tensor.is_floating_point() or torch.isfinite(tensor).all() for tensor in tensors))
 
     def test_base_mix_validation_file_is_never_accepted_as_train_input(self) -> None:
         altered = copy.deepcopy(AI4PRIVACY_BASE_MIX)
