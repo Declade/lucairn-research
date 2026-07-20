@@ -10,7 +10,7 @@ import math
 import re
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from eval_model import evaluate_loaded_model, load_model
 from powerfloor_freeze import current_dev_counts, parse_frozen_power_floors, verify_power_floors
@@ -82,46 +82,105 @@ def _require_smoke_gate(path: Path | None, *, local_root: Path) -> None:
         raise FinalRunRefused("smoke report is not the locked 10-row FP32 MPS protocol")
 
 
-def _loss_by_epoch(log_history: list[dict[str, Any]], epochs: int) -> dict[int, float | None]:
-    values: dict[int, float | None] = {epoch: None for epoch in range(1, epochs + 1)}
-    for event in log_history:
-        if not isinstance(event, dict) or "loss" not in event:
-            continue
-        event_epoch = event.get("epoch")
-        if isinstance(event_epoch, (int, float)):
-            epoch = min(epochs, max(1, math.ceil(float(event_epoch))))
-            values[epoch] = float(event["loss"])
-    return values
+def _is_step_epoch_boundary(global_step: int, steps_per_epoch: int) -> bool:
+    return global_step > 0 and global_step % steps_per_epoch == 0
 
 
-def _epoch_metrics(
-    *,
-    artifact: Path,
-    epochs: int,
-    steps_per_epoch: int,
-    losses: dict[int, float | None],
-    dev_rows: list[dict[str, Any]],
-    local_root: Path,
-    device: str,
+def _validate_step_epoch_records(
+    records: list[dict[str, Any]], *, steps_per_epoch: int, max_steps: int
 ) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for epoch in range(1, epochs + 1):
-        checkpoint = artifact / f"checkpoint-{epoch * steps_per_epoch}"
-        # Trainer checkpoints are persisted each epoch.  The last row uses the
-        # explicit final saved artifact, which is the sole acceptance artifact.
-        reload_target = artifact if epoch == epochs else checkpoint
-        if not reload_target.is_dir():
-            raise ToolingError(f"expected saved checkpoint for epoch {epoch} is missing: {reload_target}")
-        metrics = evaluate_loaded_model(load_model(reload_target, local_root=local_root, device=device), dev_rows)
-        result.append(
+    """Validate complete sampler-owned epochs without interpreting HF epochs as keys."""
+    if steps_per_epoch < 1:
+        raise ToolingError("steps_per_epoch must be positive")
+    expected_epochs = range(1, max_steps // steps_per_epoch + 1)
+    by_epoch: dict[int, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ToolingError("per-epoch training record must be an object")
+        epoch = record.get("epoch")
+        global_step = record.get("global_step")
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            raise ToolingError("per-epoch training record has no integer epoch index")
+        if not isinstance(global_step, int) or isinstance(global_step, bool):
+            raise ToolingError("per-epoch training record has no integer global_step")
+        if global_step > max_steps:
+            raise ToolingError("per-epoch training record exceeds the configured max_steps")
+        if not _is_step_epoch_boundary(global_step, steps_per_epoch) or epoch != global_step // steps_per_epoch:
+            raise ToolingError("per-epoch training record does not align with a sampler step boundary")
+        if epoch in by_epoch:
+            raise ToolingError(f"trainer emitted duplicate per-epoch record for epoch {epoch}")
+        if not isinstance(record.get("loss"), (int, float)) or isinstance(record["loss"], bool):
+            raise ToolingError(f"per-epoch training record has no loss for epoch {epoch}")
+        if not isinstance(record.get("hf_epoch"), (int, float)) or isinstance(record["hf_epoch"], bool):
+            raise ToolingError(f"per-epoch training record has no HF epoch mapping for epoch {epoch}")
+        if not isinstance(record.get("saved_artifact_tree_sha256"), str):
+            raise ToolingError(f"per-epoch training record has no saved artifact hash for epoch {epoch}")
+        if not isinstance(record.get("dev_metrics_saved_reloaded"), dict):
+            raise ToolingError(f"per-epoch training record has no saved-and-reloaded dev metrics for epoch {epoch}")
+        by_epoch[epoch] = record
+    missing = [epoch for epoch in expected_epochs if epoch not in by_epoch]
+    if missing:
+        raise ToolingError(f"trainer did not emit the required per-epoch loss records for epoch(s): {missing}")
+    return [by_epoch[epoch] for epoch in expected_epochs]
+
+
+class _StepEpochBoundaryRecorder:
+    """Collect interval loss at a step boundary, then score the saved checkpoint."""
+
+    def __init__(
+        self,
+        *,
+        steps_per_epoch: int,
+        evaluate_saved_artifact: Callable[[Path], dict[str, Any]],
+    ) -> None:
+        if steps_per_epoch < 1:
+            raise ToolingError("steps_per_epoch must be positive")
+        self.steps_per_epoch = steps_per_epoch
+        self.evaluate_saved_artifact = evaluate_saved_artifact
+        self.records: list[dict[str, Any]] = []
+        self._loss_by_step: dict[int, float] = {}
+        self._hf_epoch_by_step: dict[int, float] = {}
+
+    def record_interval_loss(self, *, global_step: int, hf_epoch: Any, logs: dict[str, Any] | None) -> None:
+        if not _is_step_epoch_boundary(global_step, self.steps_per_epoch):
+            return
+        # Trainer emits a final summary log (train_loss/runtime) at the final
+        # step after the interval loss has already been recorded.  It is not a
+        # second interval and must not overwrite or reject the boundary record.
+        if not isinstance(logs, dict) or "loss" not in logs:
+            return
+        if not isinstance(logs["loss"], (int, float)) or isinstance(logs["loss"], bool):
+            raise ToolingError(f"trainer did not emit the required per-epoch loss record at step {global_step}")
+        if not isinstance(hf_epoch, (int, float)) or isinstance(hf_epoch, bool):
+            raise ToolingError(f"trainer did not emit an HF epoch mapping at step {global_step}")
+        self._loss_by_step[global_step] = float(logs["loss"])
+        self._hf_epoch_by_step[global_step] = float(hf_epoch)
+
+    def record_saved_boundary(self, *, global_step: int, hf_epoch: Any, checkpoint: Path) -> None:
+        if not _is_step_epoch_boundary(global_step, self.steps_per_epoch):
+            return
+        if any(record["global_step"] == global_step for record in self.records):
+            raise ToolingError(f"trainer emitted duplicate saved checkpoint for step {global_step}")
+        if global_step not in self._loss_by_step:
+            raise ToolingError(f"trainer saved step {global_step} before emitting its interval loss")
+        mapped_hf_epoch = self._hf_epoch_by_step.get(global_step, hf_epoch)
+        if not isinstance(mapped_hf_epoch, (int, float)) or isinstance(mapped_hf_epoch, bool):
+            raise ToolingError(f"trainer did not emit an HF epoch mapping at step {global_step}")
+        if not checkpoint.is_dir():
+            raise ToolingError(f"expected saved checkpoint at sampler step {global_step} is missing: {checkpoint}")
+        metrics = self.evaluate_saved_artifact(checkpoint)
+        if not isinstance(metrics, dict):
+            raise ToolingError(f"saved-and-reloaded dev evaluation did not return metrics at step {global_step}")
+        self.records.append(
             {
-                "epoch": epoch,
-                "loss": losses[epoch],
-                "saved_artifact_tree_sha256": sha256_tree(reload_target),
+                "epoch": global_step // self.steps_per_epoch,
+                "global_step": global_step,
+                "hf_epoch": float(mapped_hf_epoch),
+                "loss": self._loss_by_step[global_step],
+                "saved_artifact_tree_sha256": sha256_tree(checkpoint),
                 "dev_metrics_saved_reloaded": metrics,
             }
         )
-    return result
 
 
 def run_training(
@@ -140,6 +199,7 @@ def run_training(
         from gliner import GLiNER
         from gliner.data_processing import UniEncoderSpanDataCollator
         from gliner.training import Trainer, TrainingArguments
+        from transformers import TrainerCallback
     except ImportError as exc:  # pragma: no cover - actual training only
         raise ToolingError("training requires pinned torch and gliner dependencies") from exc
     active_mode = mode or str(config.get("mode", "final"))
@@ -198,8 +258,8 @@ def run_training(
     # A complete epoch is sampler-owned replay exposure, not duplicated source rows.
     steps_per_epoch = math.ceil(len(synthetic_rows) / batch_size)
     max_steps = max_steps_override if max_steps_override is not None else steps_per_epoch * epochs
-    metrics_epochs = 1 if max_steps_override is not None else epochs
-    save_steps = max_steps if max_steps_override is not None else steps_per_epoch
+    trainer_epochs = 1 if max_steps_override is not None else epochs
+    completed_step_epochs = max_steps // steps_per_epoch
     sampled = sample_update_weighted_rows(
         synthetic_rows=synthetic_rows,
         base_rows=base_rows,
@@ -224,7 +284,7 @@ def run_training(
         raise ToolingError(f"full fine-tune method freeze violated; frozen parameters found: {frozen[:3]}")
     training_args = TrainingArguments(
         output_dir=str(artifact),
-        num_train_epochs=float(metrics_epochs),
+        num_train_epochs=float(trainer_epochs),
         max_steps=max_steps,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
@@ -237,10 +297,10 @@ def run_training(
         warmup_ratio=float(training["warmup_ratio"]),
         loss_reduction=str(training["loss_reduction"]),
         save_strategy="steps",
-        save_steps=save_steps,
-        logging_steps=save_steps,
+        save_steps=steps_per_epoch,
+        logging_steps=steps_per_epoch,
         logging_strategy="steps",
-        save_total_limit=metrics_epochs + 1,
+        save_total_limit=completed_step_epochs + 1,
         bf16=False,
         fp16=False,
         use_cpu=device == "cpu",
@@ -250,7 +310,43 @@ def run_training(
         seed=seed,
     )
     collator = UniEncoderSpanDataCollator(model.config, data_processor=model.data_processor, prepare_labels=True)
-    trainer = Trainer(model=model, args=training_args, train_dataset=examples, eval_dataset=None, data_collator=collator)
+
+    def evaluate_saved_checkpoint(checkpoint: Path) -> dict[str, Any]:
+        return evaluate_loaded_model(load_model(checkpoint, local_root=root, device=device), dev_rows)
+
+    boundary_recorder = _StepEpochBoundaryRecorder(
+        steps_per_epoch=steps_per_epoch,
+        evaluate_saved_artifact=evaluate_saved_checkpoint,
+    )
+
+    class StepEpochBoundaryCallback(TrainerCallback):
+        """Score sampler-owned epochs after Trainer has persisted each checkpoint."""
+
+        def on_log(self, _args: Any, state: Any, control: Any, logs: dict[str, Any] | None = None, **_kwargs: Any) -> Any:
+            boundary_recorder.record_interval_loss(
+                global_step=int(state.global_step),
+                hf_epoch=state.epoch,
+                logs=logs,
+            )
+            return control
+
+        def on_save(self, args: Any, state: Any, control: Any, **_kwargs: Any) -> Any:
+            global_step = int(state.global_step)
+            boundary_recorder.record_saved_boundary(
+                global_step=global_step,
+                hf_epoch=state.epoch,
+                checkpoint=Path(args.output_dir) / f"checkpoint-{global_step}",
+            )
+            return control
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=examples,
+        eval_dataset=None,
+        data_collator=collator,
+        callbacks=[StepEpochBoundaryCallback()],
+    )
     with warnings.catch_warnings(record=True) as emitted_warnings:
         warnings.simplefilter("always")
         trainer.train()
@@ -258,19 +354,10 @@ def run_training(
         # Persist the final in-memory model explicitly because evaluation only
         # accepts the complete saved/reloaded artifact, never native-state metrics.
         model.save_pretrained(str(artifact))
-        # Do not accept native-state scores: every metric below loads a saved file.
-        loss_by_epoch = _loss_by_epoch(list(getattr(trainer.state, "log_history", [])), metrics_epochs)
-        missing_losses = [epoch for epoch, loss in loss_by_epoch.items() if loss is None]
-        if missing_losses:
-            raise ToolingError(f"trainer did not emit the required per-epoch loss records for epoch(s): {missing_losses}")
-        epoch_metrics = _epoch_metrics(
-            artifact=artifact,
-            epochs=metrics_epochs,
-            steps_per_epoch=save_steps,
-            losses=loss_by_epoch,
-            dev_rows=dev_rows,
-            local_root=root,
-            device=device,
+        epoch_metrics = _validate_step_epoch_records(
+            boundary_recorder.records,
+            steps_per_epoch=steps_per_epoch,
+            max_steps=max_steps,
         )
     nondeterministic_ops = _nondeterministic_ops(emitted_warnings)
     run_json = {
@@ -289,6 +376,10 @@ def run_training(
         "environment": host_environment(),
         "training_code_sha256": code_hashes(),
         "artifact": {"local_ref": local_ref(artifact, root), "tree_sha256": sha256_tree(artifact)},
+        "epoch_boundaries": [
+            {key: epoch_event[key] for key in ("epoch", "global_step", "hf_epoch")}
+            for epoch_event in epoch_metrics
+        ],
         "epochs": epoch_metrics,
     }
     missing_run_fields = RUN_JSON_REQUIRED_FIELDS - set(run_json)

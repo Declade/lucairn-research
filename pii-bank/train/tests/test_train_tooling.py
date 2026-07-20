@@ -144,6 +144,61 @@ class TrainToolingTests(unittest.TestCase):
             ["scatter_reduce_mps"],
         )
 
+    def test_step_epoch_boundary_recorder_emits_three_records_and_validates_step_keys(self) -> None:
+        class StubTrainer:
+            def __init__(self, recorder: train._StepEpochBoundaryRecorder, artifact: Path) -> None:
+                self.recorder = recorder
+                self.artifact = artifact
+
+            def train(self) -> None:
+                for global_step in range(1, 7):
+                    if global_step % 2:
+                        continue
+                    hf_epoch = global_step / 6
+                    self.recorder.record_interval_loss(
+                        global_step=global_step,
+                        hf_epoch=hf_epoch,
+                        logs={"loss": 10.0 - global_step},
+                    )
+                    checkpoint = self.artifact / f"checkpoint-{global_step}"
+                    checkpoint.mkdir()
+                    (checkpoint / "weights.bin").write_text(str(global_step), encoding="utf-8")
+                    self.recorder.record_saved_boundary(
+                        global_step=global_step,
+                        hf_epoch=hf_epoch,
+                        checkpoint=checkpoint,
+                    )
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory)
+            recorder = train._StepEpochBoundaryRecorder(
+                steps_per_epoch=2,
+                evaluate_saved_artifact=lambda _checkpoint: {"overall": {"macro_f1": 0.5}},
+            )
+            StubTrainer(recorder, artifact).train()
+            # Transformers logs final train_loss/runtime at the same final
+            # global step; it is a summary, not another interval loss record.
+            recorder.record_interval_loss(
+                global_step=6,
+                hf_epoch=1.0,
+                logs={"train_loss": 7.0, "train_runtime": 1.0},
+            )
+            records = train._validate_step_epoch_records(
+                recorder.records,
+                steps_per_epoch=2,
+                max_steps=6,
+            )
+
+        self.assertEqual([record["epoch"] for record in records], [1, 2, 3])
+        self.assertEqual([record["global_step"] for record in records], [2, 4, 6])
+        self.assertEqual([record["hf_epoch"] for record in records], [2 / 6, 4 / 6, 1.0])
+        with self.assertRaisesRegex(ToolingError, r"epoch\(s\): \[2\]"):
+            train._validate_step_epoch_records(
+                [records[0], records[2]],
+                steps_per_epoch=2,
+                max_steps=6,
+            )
+
     def test_train_validate_replay_cli_reports_all_rows_without_importing_torch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             local_root = Path(directory)
