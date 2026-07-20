@@ -2,20 +2,21 @@
 
 ## Pinned environment
 
-- Python: **3.11.9** on macOS arm64.
-- PyTorch: **2.5.1** (`torch==2.5.1`); use the macOS wheel and assert `torch.backends.mps.is_available()` before an MPS run.
-- GLiNER: **0.2.24** (`gliner==0.2.24`).
-- Transformers: **4.46.3** (`transformers==4.46.3`).
-- Direct project dependencies are only stdlib, Torch, GLiNER, and Transformers. GLiNER/Transformers' normal transitive packaging dependencies are resolved by pip; no adapter, PEFT, data, metrics, or experiment-tracking package is used.
+- Python: **3.14** on macOS arm64.
+- PyTorch: **2.13.0** (`torch==2.13.0`); use the macOS wheel and assert `torch.backends.mps.is_available()` before an MPS run.
+- GLiNER: **0.2.27** (`gliner==0.2.27`).
+- Transformers: **5.6.2** (`transformers==5.6.2`).
+- Accelerate: **>=1.1.0**; GLiNER's `Trainer` and Transformers' torch training integration require it before training can start.
+- Direct project dependencies are only stdlib, Torch, GLiNER, Transformers, and Accelerate. GLiNER/Transformers' normal transitive packaging dependencies are resolved by pip; no adapter, PEFT, data, metrics, or experiment-tracking package is used.
 - Base checkpoint: **`urchade/gliner_multi_pii-v1` at revision `1fcf13e8`**. The GLiNER snapshot's own config freezes `max_len=384`, `max_width=12`, the mDeBERTa-v3-base backbone, and `fine_tune=true`.
 
 Provision into a fresh virtual environment:
 
 ```bash
-python3.11 -m venv .venv-pii-bank
+python3.14 -m venv .venv-pii-bank
 source .venv-pii-bank/bin/activate
 python -m pip install --upgrade pip
-python -m pip install torch==2.5.1 gliner==0.2.24 transformers==4.46.3
+python -m pip install torch==2.13.0 gliner==0.2.27 transformers==5.6.2 'accelerate>=1.1.0'
 python -c 'import torch; assert torch.backends.mps.is_available(), "MPS unavailable"; print(torch.__version__)'
 ```
 
@@ -36,7 +37,9 @@ The checkpoint cache is `${PII_BANK_LOCAL_ROOT}/context/pii-bank/train-runs/chec
 
 S3 uses **full fine-tuning in FP32**: all checkpoint parameters remain trainable, with no frozen component or adapter. This is the compliant choice because the roughly 200M checkpoint fits MPS unified memory, FP32 is the mandatory MPS-protocol starting precision, and adapters would require PEFT or custom adapter scope beyond the allowed dependencies. The frozen geometry is sequence length **384** and maximum span width **12**. The ordered inference/training label map is `PERSON/person`, `LOCATION/location`, `VENDOR/vendor`, `ROLE/role`, `TECHNICAL_IDENTIFIER/technical identifier`. The tokenizer is the one bundled in the pinned GLiNER checkpoint snapshot (`tokenizer_source=base-checkpoint-bundled`, revision `1fcf13e8`); no mutable upstream tokenizer revision is accepted.
 
-The saved-and-reloaded artifact is the only object passed to `eval_model.py`: GLiNER `Trainer.save_model()` writes the local artifact, the runner computes a directory-tree SHA-256, then reloads it with `GLiNER.from_pretrained(local_artifact)` for per-epoch/final dev scoring. Native in-memory metrics are never acceptance evidence.
+The saved-and-reloaded artifact is the only object passed to `eval_model.py`: after Trainer checkpoints, the runner explicitly writes the final local artifact with `GLiNER.save_pretrained()`, computes a directory-tree SHA-256, then reloads it with `GLiNER.from_pretrained(local_artifact)` for per-epoch/final dev scoring. Native in-memory metrics are never acceptance evidence.
+
+MPS training is seed-controlled but not bit-deterministic: MPS scatter operations lack deterministic kernels. The preregistered three-seed median/range protocol mitigates this, and every run records the emitted nondeterministic operation names in `nondeterministic_ops`. Generator and corpus determinism proofs are unaffected.
 
 ## MPS smoke gate
 

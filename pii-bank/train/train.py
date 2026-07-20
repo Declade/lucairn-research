@@ -8,6 +8,7 @@ import copy
 import json
 import math
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from tooling import (
     DEV_SHA256,
     DEFAULT_DEV_PATH,
     FinalRunRefused,
+    ReplayAlignmentRefused,
     ToolingError,
     assert_config_has_no_eval_only_paths,
     assert_not_eval_only_path,
@@ -44,10 +46,29 @@ from tooling import (
 )
 
 
+NONDETERMINISTIC_OP_WARNING = re.compile(r"^(?P<op>.+?) does not have a deterministic implementation")
+RUN_JSON_REQUIRED_FIELDS = frozenset({"nondeterministic_ops"})
+
+
 def _safe_run_id(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
         raise ToolingError("run_id may contain only letters, digits, '.', '_', and '-'")
     return value
+
+
+def _enable_seed_controlled_torch(torch_module: Any) -> None:
+    """Keep deterministic controls on while allowing MPS-only kernel warnings."""
+    torch_module.use_deterministic_algorithms(True, warn_only=True)
+
+
+def _nondeterministic_ops(emitted_warnings: list[Any]) -> list[str]:
+    """Extract stable operation names from PyTorch deterministic-kernel warnings."""
+    operations = {
+        match.group("op")
+        for warning in emitted_warnings
+        if (match := NONDETERMINISTIC_OP_WARNING.match(str(warning.message))) is not None
+    }
+    return sorted(operations)
 
 
 def _require_smoke_gate(path: Path | None, *, local_root: Path) -> None:
@@ -111,16 +132,24 @@ def run_training(
     device: str = "mps",
     smoke_report: Path | None = None,
     run_id_override: str | None = None,
+    max_steps_override: int | None = None,
 ) -> dict[str, Any]:
     """Run one train configuration; callable by executable dev selection."""
     try:
         import torch
         from gliner import GLiNER
+        from gliner.data_processing import UniEncoderSpanDataCollator
+        from gliner.training import Trainer, TrainingArguments
     except ImportError as exc:  # pragma: no cover - actual training only
         raise ToolingError("training requires pinned torch and gliner dependencies") from exc
     active_mode = mode or str(config.get("mode", "final"))
     if active_mode not in {"final", "smoke", "dev-explore"}:
         raise ToolingError("mode must be final, smoke, or dev-explore")
+    if max_steps_override is not None:
+        if active_mode != "dev-explore":
+            raise FinalRunRefused("--max-steps-override is restricted to dev-explore mode")
+        if max_steps_override < 1:
+            raise ToolingError("max_steps_override must be positive")
     if device != "mps":
         raise ToolingError("S3 full fine-tuning is MacBook MPS-only; use smoke.py for the CPU parity leg")
     if not torch.backends.mps.is_available():
@@ -144,13 +173,20 @@ def run_training(
     dev_rows = load_jsonl(DEFAULT_DEV_PATH)
     seed = int(config["seed"])
     seed_everything(seed)
-    torch.use_deterministic_algorithms(True)
+    _enable_seed_controlled_torch(torch)
 
+    replay_validation: dict[str, Any] | None = None
     if active_mode == "final":
-        base_rows = require_admitted_base_mix(config, root)
+        replay = require_admitted_base_mix(config, root)
+        base_rows = replay.rows
+        replay_validation = replay.report
     else:
         try:
-            base_rows = require_admitted_base_mix(config, root)
+            replay = require_admitted_base_mix(config, root)
+            base_rows = replay.rows
+            replay_validation = replay.report
+        except ReplayAlignmentRefused:
+            raise
         except FinalRunRefused:
             base_rows = []
     training = config["training"]
@@ -161,10 +197,13 @@ def run_training(
     synthetic_rows = load_synthetic_checkpoint(int(config["corpus_size"]))
     # A complete epoch is sampler-owned replay exposure, not duplicated source rows.
     steps_per_epoch = math.ceil(len(synthetic_rows) / batch_size)
+    max_steps = max_steps_override if max_steps_override is not None else steps_per_epoch * epochs
+    metrics_epochs = 1 if max_steps_override is not None else epochs
+    save_steps = max_steps if max_steps_override is not None else steps_per_epoch
     sampled = sample_update_weighted_rows(
         synthetic_rows=synthetic_rows,
         base_rows=base_rows,
-        updates=steps_per_epoch * epochs,
+        updates=max_steps,
         batch_size=batch_size,
         seed=seed,
     )
@@ -183,11 +222,10 @@ def run_training(
     frozen = [name for name, parameter in model.named_parameters() if not parameter.requires_grad]
     if frozen:
         raise ToolingError(f"full fine-tune method freeze violated; frozen parameters found: {frozen[:3]}")
-    trainer = model.train_model(
-        train_dataset=examples,
-        eval_dataset=None,
+    training_args = TrainingArguments(
         output_dir=str(artifact),
-        max_steps=steps_per_epoch * epochs,
+        num_train_epochs=float(metrics_epochs),
+        max_steps=max_steps,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         learning_rate=float(training["learning_rate_encoder"]),
@@ -199,36 +237,50 @@ def run_training(
         warmup_ratio=float(training["warmup_ratio"]),
         loss_reduction=str(training["loss_reduction"]),
         save_strategy="steps",
-        save_steps=steps_per_epoch,
-        logging_steps=steps_per_epoch,
+        save_steps=save_steps,
+        logging_steps=save_steps,
         logging_strategy="steps",
-        save_total_limit=epochs + 1,
+        save_total_limit=metrics_epochs + 1,
         bf16=False,
         fp16=False,
+        use_cpu=device == "cpu",
         dataloader_num_workers=0,
+        remove_unused_columns=False,
         report_to="none",
         seed=seed,
     )
-    trainer.save_model(str(artifact))
-    # Do not accept native-state scores: every metric below loads a saved file.
-    loss_by_epoch = _loss_by_epoch(list(getattr(trainer.state, "log_history", [])), epochs)
-    missing_losses = [epoch for epoch, loss in loss_by_epoch.items() if loss is None]
-    if missing_losses:
-        raise ToolingError(f"trainer did not emit the required per-epoch loss records for epoch(s): {missing_losses}")
-    epoch_metrics = _epoch_metrics(
-        artifact=artifact,
-        epochs=epochs,
-        steps_per_epoch=steps_per_epoch,
-        losses=loss_by_epoch,
-        dev_rows=dev_rows,
-        local_root=root,
-        device=device,
-    )
+    collator = UniEncoderSpanDataCollator(model.config, data_processor=model.data_processor, prepare_labels=True)
+    trainer = Trainer(model=model, args=training_args, train_dataset=examples, eval_dataset=None, data_collator=collator)
+    with warnings.catch_warnings(record=True) as emitted_warnings:
+        warnings.simplefilter("always")
+        trainer.train()
+        # Trainer checkpoints use the same save_pretrained representation.
+        # Persist the final in-memory model explicitly because evaluation only
+        # accepts the complete saved/reloaded artifact, never native-state metrics.
+        model.save_pretrained(str(artifact))
+        # Do not accept native-state scores: every metric below loads a saved file.
+        loss_by_epoch = _loss_by_epoch(list(getattr(trainer.state, "log_history", [])), metrics_epochs)
+        missing_losses = [epoch for epoch, loss in loss_by_epoch.items() if loss is None]
+        if missing_losses:
+            raise ToolingError(f"trainer did not emit the required per-epoch loss records for epoch(s): {missing_losses}")
+        epoch_metrics = _epoch_metrics(
+            artifact=artifact,
+            epochs=metrics_epochs,
+            steps_per_epoch=save_steps,
+            losses=loss_by_epoch,
+            dev_rows=dev_rows,
+            local_root=root,
+            device=device,
+        )
+    nondeterministic_ops = _nondeterministic_ops(emitted_warnings)
     run_json = {
         "schema_version": 1,
         "status": "completed-dev-explore-no-base-mix" if sampled.report["no_base_mix"] else "completed",
         "mode": active_mode,
+        "max_steps_override": max_steps_override,
+        "nondeterministic_ops": nondeterministic_ops,
         "no_base_mix": sampled.report["no_base_mix"],
+        "replay_validation": replay_validation,
         "config": config,
         "method_freeze": config["method_freeze"],
         "frozen_dev_sha256": sha256_file(DEFAULT_DEV_PATH),
@@ -239,6 +291,9 @@ def run_training(
         "artifact": {"local_ref": local_ref(artifact, root), "tree_sha256": sha256_tree(artifact)},
         "epochs": epoch_metrics,
     }
+    missing_run_fields = RUN_JSON_REQUIRED_FIELDS - set(run_json)
+    if missing_run_fields:
+        raise ToolingError(f"run JSON missing required fields: {sorted(missing_run_fields)}")
     write_json(run_dir / "run.json", run_json)
     return run_json
 
@@ -250,6 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-root", type=str, default=None)
     parser.add_argument("--smoke-report", type=Path, default=None, help="required MPS PASS report for final mode")
     parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--validate-replay", action="store_true", help="validate all admitted replay rows and exit before training")
+    parser.add_argument(
+        "--max-steps-override",
+        type=int,
+        default=None,
+        help="dev-explore only: run exactly this many training updates for execution proof",
+    )
     return parser
 
 
@@ -259,12 +321,16 @@ def main(argv: list[str] | None = None) -> int:
         local_root = require_local_root(args.local_root)
         assert_not_eval_only_path(args.config, local_root=local_root)
         config = load_run_config(args.config)
+        if args.validate_replay:
+            require_admitted_base_mix(config, local_root)
+            return 0
         result = run_training(
             copy.deepcopy(config),
             mode=args.mode,
             local_root=local_root,
             smoke_report=args.smoke_report,
             run_id_override=args.run_id,
+            max_steps_override=args.max_steps_override,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0

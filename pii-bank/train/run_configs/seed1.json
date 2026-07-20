@@ -21,7 +21,7 @@
   "corpus_size": 8000,
   "dev_sha256": "8c7b762e0eca7d3455c497fc503552b47fb62bab2945bdf807524f183051518f",
   "method_freeze": {
-    "justification": "Full FP32 fine-tuning keeps every parameter trainable in the roughly 200M checkpoint, which fits MPS unified memory and is the required MPS-protocol starting precision; adapters would add disallowed PEFT/custom scope.",
+    "justification": "Full FP32 fine-tuning keeps every parameter trainable in the roughly 200M checkpoint, which fits MPS unified memory and is the required MPS-protocol starting precision; adapters would add disallowed PEFT/custom scope. MPS training is seed-controlled but not bit-deterministic because scatter operations lack deterministic MPS kernels; the preregistered 3-seed median/range protocol mitigates this and each run records nondeterministic ops.",
     "label_order": [
       {"category": "PERSON", "model_label": "person"},
       {"category": "LOCATION", "model_label": "location"},
@@ -32,7 +32,7 @@
     "max_span_width": 12,
     "precision": "fp32",
     "save_reload": {
-      "artifact_format": "GLiNER Trainer.save_model / from_pretrained",
+      "artifact_format": "GLiNER model.save_pretrained / from_pretrained",
       "evaluate_only_saved_and_reloaded": true
     },
     "sequence_length": 384,

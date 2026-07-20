@@ -102,6 +102,18 @@ class FinalRunRefused(ToolingError):
     pass
 
 
+class ReplayAlignmentRefused(FinalRunRefused):
+    pass
+
+
+@dataclass(frozen=True)
+class ReplayLoadResult:
+    """Converted replay rows plus the mandatory preflight accounting."""
+
+    rows: list[dict[str, Any]]
+    report: dict[str, Any]
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -346,14 +358,38 @@ def _require_hash(path: Path, expected: str, *, description: str) -> None:
         raise FinalRunRefused(f"{description} is missing or SHA-256 does not match the admitted record")
 
 
-def ai4privacy_replay_row(source: dict[str, Any]) -> dict[str, Any] | None:
-    """Convert one faithful export row without ever consulting `split`."""
+def _snap_to_training_word_boundaries(text: str, start: int, end: int) -> tuple[int, int] | None:
+    """Return the enclosing token boundaries from the trainer's own splitter."""
+    covered = [
+        (token_start, token_end)
+        for _, token_start, token_end in _word_tokens_with_offsets(text)
+        if token_end > start and token_start < end
+    ]
+    if not covered:
+        return None
+    return covered[0][0], covered[-1][1]
+
+
+def _spans_cross_after_snapping(spans: list[dict[str, Any]]) -> bool:
+    """Reject disjoint source spans that snapping would merge or overlap."""
+    for index, span in enumerate(spans):
+        for other in spans[index + 1 :]:
+            source_overlap = span["start"] < other["end"] and other["start"] < span["end"]
+            snapped_overlap = span["snapped_start"] < other["snapped_end"] and other["snapped_start"] < span["snapped_end"]
+            if snapped_overlap and not source_overlap:
+                return True
+    return False
+
+
+def _convert_ai4privacy_replay_row(source: dict[str, Any]) -> tuple[dict[str, Any] | None, int, bool]:
+    """Convert one source row and report snapped spans plus unsafe-row drops."""
     text, language, uid, masks = source.get("source_text"), source.get("language"), source.get("uid"), source.get("privacy_mask")
     if language not in {"en", "de"}:
-        return None
+        return None, 0, False
     if not isinstance(text, str) or not isinstance(uid, int) or not isinstance(masks, list):
         raise FinalRunRefused("ai4privacy train export row is structurally invalid")
     spans: list[dict[str, Any]] = []
+    snapped_spans = 0
     for mask in masks:
         if not isinstance(mask, dict):
             raise FinalRunRefused("ai4privacy privacy_mask entry is not an object")
@@ -371,16 +407,43 @@ def ai4privacy_replay_row(source: dict[str, Any]) -> dict[str, Any] | None:
             or text[start:end] != value
         ):
             raise FinalRunRefused("ai4privacy span violates the admitted codepoint end-exclusive surface contract")
-        spans.append({"start": start, "end": end, "category": category, "expected": "REDACT", "surface": value})
+        snapped = _snap_to_training_word_boundaries(text, start, end)
+        if snapped is None or snapped[0] >= snapped[1]:
+            return None, snapped_spans, True
+        snapped_start, snapped_end = snapped
+        if (start, end) != (snapped_start, snapped_end):
+            snapped_spans += 1
+        spans.append(
+            {
+                "start": start,
+                "end": end,
+                "snapped_start": snapped_start,
+                "snapped_end": snapped_end,
+                "category": category,
+                "expected": "REDACT",
+            }
+        )
     if not spans:
-        return None
+        return None, 0, False
+    if _spans_cross_after_snapping(spans):
+        return None, snapped_spans, True
+    replay_spans = [
+        {
+            "start": span["snapped_start"],
+            "end": span["snapped_end"],
+            "category": span["category"],
+            "expected": span["expected"],
+            "surface": text[span["snapped_start"] : span["snapped_end"]],
+        }
+        for span in spans
+    ]
     family_id = f"ai4privacy-mini10k-{uid}"
     return {
         "id": family_id,
         "text": text,
         "lang": language,
         "zone": "prose",
-        "spans": spans,
+        "spans": replay_spans,
         "org_id": None,
         "provenance": "synthetic-generated",
         "consent_basis": "public-corpus",
@@ -389,10 +452,48 @@ def ai4privacy_replay_row(source: dict[str, Any]) -> dict[str, Any] | None:
         "template_lineage": family_id,
         "source": "ai4privacy/openpii-masking-mini-10k@ad851605 faithful train export",
         "created": "2026-07-20",
+    }, snapped_spans, False
+
+
+def ai4privacy_replay_row(source: dict[str, Any]) -> dict[str, Any] | None:
+    """Compatibility converter for one faithful export row without consulting `split`."""
+    row, _, _ = _convert_ai4privacy_replay_row(source)
+    return row
+
+
+def convert_ai4privacy_replay_rows(sources: Iterable[dict[str, Any]]) -> ReplayLoadResult:
+    """Convert and fully preflight every eligible replay row before sampling."""
+    rows: list[dict[str, Any]] = []
+    total_rows = 0
+    snapped_spans = 0
+    dropped_ids: list[str] = []
+    for source in sources:
+        row, row_snapped_spans, dropped = _convert_ai4privacy_replay_row(source)
+        if row is not None or dropped:
+            total_rows += 1
+        snapped_spans += row_snapped_spans
+        if dropped:
+            dropped_ids.append(f"ai4privacy-mini10k-{source.get('uid')}")
+        elif row is not None:
+            rows.append(row)
+    # This is intentionally the same full converter check training uses, run
+    # while the complete base mix is loaded rather than lazily during sampling.
+    rows_to_gliner_examples(rows)
+    report = {
+        "total_rows": total_rows,
+        "spans_snapped": snapped_spans,
+        "rows_dropped": len(dropped_ids),
+        "dropped_row_example_ids": dropped_ids[:10],
     }
+    print(f"REPLAY VALIDATION: {json.dumps(report, ensure_ascii=False, sort_keys=True)}")
+    if total_rows and len(dropped_ids) * 10 > total_rows:
+        raise ReplayAlignmentRefused(
+            f"replay alignment dropped {len(dropped_ids)}/{total_rows} rows (>10%); review SNAP-THEN-DROP policy"
+        )
+    return ReplayLoadResult(rows=rows, report=report)
 
 
-def require_admitted_base_mix(config: dict[str, Any], local_root: Path) -> list[dict[str, Any]]:
+def require_admitted_base_mix(config: dict[str, Any], local_root: Path) -> ReplayLoadResult:
     if config.get("base_mix") != AI4PRIVACY_BASE_MIX:
         raise FinalRunRefused("final run requires the frozen admitted ai4privacy mini-10k base_mix block")
     block = AI4PRIVACY_BASE_MIX
@@ -412,10 +513,10 @@ def require_admitted_base_mix(config: dict[str, Any], local_root: Path) -> list[
     for expected in (str(block["record_sha256"]), *dict(block["file_sha256"]).values()):
         if expected != str(block["record_sha256"]) and expected not in record:
             raise FinalRunRefused("base-mix admission record does not bind the configured source hashes")
-    rows = [converted for source in load_jsonl(paths["train_jsonl"]) if (converted := ai4privacy_replay_row(source)) is not None]
-    if not rows:
+    replay = convert_ai4privacy_replay_rows(load_jsonl(paths["train_jsonl"]))
+    if not replay.rows:
         raise FinalRunRefused("admitted train export yielded no EN/DE mapped replay rows")
-    return rows
+    return replay
 
 
 @dataclass(frozen=True)
