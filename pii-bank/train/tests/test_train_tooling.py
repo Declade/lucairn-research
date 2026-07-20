@@ -92,6 +92,15 @@ class TrainToolingTests(unittest.TestCase):
         self.assertEqual(canonical[1], canonical[2])
         self.assertEqual(len({config["seed"] for config in seeds}), 3)
 
+    def test_preregistered_pins_match_committed_config_files(self) -> None:
+        # Run the selection module's own assertion over EVERY pinned name so a
+        # config edit without a pin update (or a pin without a file) fails the
+        # suite instead of surfacing later as a selection-time refusal.
+        for name in select_on_dev.PREREGISTERED_SHA256:
+            select_on_dev._assert_preregistered_file(select_on_dev.RUN_CONFIGS / name)
+        committed = {path.name for path in select_on_dev.RUN_CONFIGS.glob("*.json")}
+        self.assertEqual(committed, set(select_on_dev.PREREGISTERED_SHA256))
+
     def test_smoke_cli_has_locked_arg_contract(self) -> None:
         parser = smoke.build_parser()
         actions = {option for action in parser._actions for option in action.option_strings}

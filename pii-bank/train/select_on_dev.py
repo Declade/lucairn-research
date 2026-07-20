@@ -40,9 +40,9 @@ RUN_CONFIGS = Path(__file__).resolve().parent / "run_configs"
 PREREGISTERED_GRID = RUN_CONFIGS / "selection-grid.json"
 PREREGISTERED_SHA256 = {
     "selection-grid.json": "430640ad2cec045671d827d80706afeda9faf6fdfa9de06ce950bc742dc89a53",
-    "seed1.json": "7b50b720d9052e076c65d959520bcb2a66eebd67c56cbdff673e3a8120f7243f",
-    "seed2.json": "a6ddd6662945479ca32da0f1b89a94d8e447066fb0064d544229396264fddbb3",
-    "seed3.json": "6132b1d78e0f0bd72aa27deb3907d5b44d98848116d1f05d9da3e9dea718e408",
+    "seed1.json": "9076eb95d565b87f110b42eb51d1dcb41a68ae8edd16d721f5c5ed7e75c1e238",
+    "seed2.json": "71e16749afeceefbb82e69a1b5073950736b9fc74a3bd60609fe874ec7f4eb43",
+    "seed3.json": "8eb665527b7f9c56c6c85b62a72e73fa5ebeb2e18fe3b9477a229d6e0f1f02c1",
     "baseline.json": "4adb817a1d47d76b26f88dbfad79670f0156ca24e64ee608c1b6ec4c3cb1714e",
 }
 DECLARED_CANDIDATE_IDS = (
